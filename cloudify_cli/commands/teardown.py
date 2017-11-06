@@ -17,7 +17,6 @@
 from cloudify_rest_client.exceptions import CloudifyClientError
 
 from .. import env
-from .profiles import use
 from .. import exceptions
 from ..cli import cfy, helptexts
 from ..bootstrap import bootstrap as bs
@@ -69,25 +68,25 @@ def teardown(ctx, force, ignore_deployments):
 
         # update local provider context since the server ip might have
         # changed in case it has gone through a recovery process.
-        _update_local_provider_context(ctx, manager_ip)
+        _update_local_provider_context(manager_ip)
 
         # execute teardown
         _do_teardown()
 
 
 @cfy.pass_logger
-def _update_local_provider_context(ctx, manager_ip, logger):
+def _update_local_provider_context(manager_ip, logger):
+    client = env.get_rest_client()
     try:
-        ctx.invoke(
-            use,
-            manager_ip=manager_ip,
-            rest_port=env.profile.rest_port,
-        )
-    except BaseException as e:
+        provider_context = client.manager.get_context()['context']
+    except Exception as e:
         logger.warning('Failed to retrieve provider context: {0}. This '
                        'may cause a leaking manager '
                        'in case it has gone through a '
                        'recovery process'.format(str(e)))
+    else:
+        env.profile.provider_context = provider_context
+        env.profile.save()
 
 
 def _get_number_of_deployments(manager_ip):
