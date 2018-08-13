@@ -18,12 +18,13 @@ import json
 
 from cloudify_rest_client.exceptions import CloudifyClientError
 
+from .. import utils
 from ..cli import cfy
 from ..exceptions import CloudifyCliError
 
 
 @cfy.group(name='groups')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 def groups():
     """Handle deployment groups
@@ -34,15 +35,14 @@ def groups():
 @groups.command(name='list',
                 short_help='List groups for a deployment [manager only]')
 @cfy.options.deployment_id(required=True)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.tenant_name(required=False, resource_name_for_help='deployment')
 @cfy.pass_client()
 @cfy.pass_logger
 def list(deployment_id, logger, client, tenant_name):
     """List all groups for a deployment
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     logger.info("Listing groups for deployment {0}...".format(
         deployment_id))
     try:

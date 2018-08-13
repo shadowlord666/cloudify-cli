@@ -16,19 +16,22 @@
 
 from cloudify_rest_client.exceptions import CloudifyClientError
 
-from ..table import print_data
 from .. import utils
 from ..cli import cfy
+from ..table import print_data, print_single, print_details
 from ..exceptions import CloudifyCliError
-
+from ..logger import NO_VERBOSE
+from ..logger import get_global_verbosity, get_global_json_output
 
 NODE_COLUMNS = ['id', 'deployment_id', 'blueprint_id', 'host_id', 'type',
                 'number_of_instances', 'planned_number_of_instances',
-                'permission', 'tenant_name', 'created_by']
+                'visibility', 'tenant_name', 'created_by']
+
+OPERATION_COLUMNS = ['name', 'inputs', 'plugin', 'executor', 'operation']
 
 
 @cfy.group(name='nodes')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 def nodes():
     """Handle a deployment's nodes
@@ -40,7 +43,7 @@ def nodes():
                short_help='Retrieve node information [manager only]')
 @cfy.argument('node-id')
 @cfy.options.deployment_id(required=True)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.tenant_name(required=False, resource_name_for_help='node')
 @cfy.pass_logger
 @cfy.pass_client()
@@ -49,8 +52,7 @@ def get(node_id, deployment_id, logger, client, tenant_name):
 
     `NODE_ID` is the node id to get information on.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     logger.info('Retrieving node {0} for deployment {1}'.format(
         node_id, deployment_id))
     try:
@@ -63,29 +65,47 @@ def get(node_id, deployment_id, logger, client, tenant_name):
     logger.debug('Getting node instances for node with ID \'{0}\''
                  .format(node_id))
     try:
-        instances = client.node_instances.list(deployment_id, node_id)
+        instances = client.node_instances.list(
+            deployment_id=deployment_id,
+            node_id=node_id
+        )
     except CloudifyClientError as e:
         if e.status_code != 404:
             raise
         raise CloudifyCliError('No node instances were found for '
                                'node {0}'.format(node_id))
 
-    print_data(NODE_COLUMNS, node, 'Node:', max_width=50)
+    columns = NODE_COLUMNS
+    if get_global_json_output():
+        columns += ['properties', 'instances']
+        if get_global_verbosity() != NO_VERBOSE:
+            columns += ['operations']
+        node['instances'] = [instance['id'] for instance in instances]
 
-    # print node properties
-    logger.info('Node properties:')
-    for property_name, property_value in utils.decode_dict(
-            node.properties).iteritems():
-        logger.info('\t{0}: {1}'.format(property_name, property_value))
-    logger.info('')
+    print_single(columns, node, 'Node:', max_width=50)
 
-    # print node instances IDs
-    logger.info('Node instance IDs:')
-    if instances:
-        for instance in instances:
-            logger.info('\t{0}'.format(instance['id']))
-    else:
-        logger.info('\tNo node instances')
+    if not get_global_json_output():
+        # print node properties
+        print_details(node.properties, 'Node properties:')
+
+        if get_global_verbosity() != NO_VERBOSE:
+            operations = []
+            for op_name, op in utils.decode_dict(node.operations).iteritems():
+                # operations is a tuple (operation_name, dict_of_attributes)
+                # we want to add the name to the dict
+                # and build a new array in order to print it in a table
+                op['name'] = op_name
+                operations += [op]
+            print_data(OPERATION_COLUMNS, operations, 'Operations:')
+            logger.info('')
+
+        # print node instances IDs
+        logger.info('Node instance IDs:')
+        if instances:
+            for instance in instances:
+                logger.info('\t{0}'.format(instance['id']))
+        else:
+            logger.info('\tNo node instances')
 
 
 @nodes.command(name='list',
@@ -97,18 +117,27 @@ def get(node_id, deployment_id, logger, client, tenant_name):
 @cfy.options.tenant_name_for_list(
     required=False, resource_name_for_help='node')
 @cfy.options.all_tenants
-@cfy.options.verbose()
+@cfy.options.search
+@cfy.options.pagination_offset
+@cfy.options.pagination_size
+@cfy.options.common_options
 @cfy.pass_logger
 @cfy.pass_client()
-def list(deployment_id, sort_by, descending, tenant_name, all_tenants,
+def list(deployment_id,
+         sort_by,
+         descending,
+         tenant_name,
+         all_tenants,
+         search,
+         pagination_offset,
+         pagination_size,
          logger, client):
     """List nodes
 
     If `DEPLOYMENT_ID` is provided, list nodes for that deployment.
     Otherwise, list nodes for all deployments.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     try:
         if deployment_id:
             logger.info('Listing nodes for deployment {0}...'.format(
@@ -119,7 +148,11 @@ def list(deployment_id, sort_by, descending, tenant_name, all_tenants,
             deployment_id=deployment_id,
             sort=sort_by,
             is_descending=descending,
-            _all_tenants=all_tenants)
+            _all_tenants=all_tenants,
+            _search=search,
+            _offset=pagination_offset,
+            _size=pagination_size
+        )
     except CloudifyClientError as e:
         if e.status_code != 404:
             raise
@@ -127,3 +160,5 @@ def list(deployment_id, sort_by, descending, tenant_name, all_tenants,
             deployment_id))
 
     print_data(NODE_COLUMNS, nodes, 'Nodes:')
+    total = nodes.metadata.pagination.total
+    logger.info('Showing {0} of {1} nodes'.format(len(nodes), total))

@@ -19,11 +19,16 @@ from .test_base import CliCommandTest
 from cloudify_cli.exceptions import CloudifyValidationError
 
 
-class UsersTest(CliCommandTest):
+class BaseUsersTest(CliCommandTest):
     def setUp(self):
-        super(UsersTest, self).setUp()
+        super(BaseUsersTest, self).setUp()
         self.use_manager()
         self.client.users = MagicMock()
+
+
+class UsersTest(BaseUsersTest):
+    def setUp(self):
+        super(UsersTest, self).setUp()
 
     def test_create_users_missing_username(self):
         outcome = self.invoke(
@@ -44,23 +49,12 @@ class UsersTest(CliCommandTest):
     def test_create_users_default_role(self):
         self.invoke('cfy users create username -p password')
         call_list = self.client.users.method_calls[0][1]
-        self.assertEqual(call_list, ('username', 'password', 'user'))
+        self.assertEqual(call_list, ('username', 'password', 'default'))
 
     def test_create_users_custom_role(self):
         self.invoke('cfy users create username -p password -r admin')
         call_list = self.client.users.method_calls[0][1]
         self.assertEqual(call_list, ('username', 'password', 'admin'))
-
-    def test_create_users_invalid_role(self):
-        outcome = self.invoke(
-            'cfy users create username -p password -r invalid_role',
-            err_str_segment='2',  # Exit code
-            exception=SystemExit
-        )
-        self.assertIn(
-            'Invalid value for "-r" / "--security-role"',
-            outcome.output
-        )
 
     def test_empty_username(self):
         self.invoke(
@@ -83,3 +77,57 @@ class UsersTest(CliCommandTest):
             err_str_segment='ERROR: The password is empty',
             exception=CloudifyValidationError
         )
+
+    def test_unlock_user(self):
+        self.invoke('cfy users unlock user1')
+        call_list = self.client.users.method_calls[0][1][0]
+        self.assertEqual(call_list, 'user1')
+
+
+class CreateUsersWithTenantTest(BaseUsersTest):
+    def setUp(self):
+        super(CreateUsersWithTenantTest, self).setUp()
+        self.client.tenants = MagicMock()
+
+    def test_create_users_without_tenant_info(self):
+        self.invoke('cfy users create username -p password')
+        call_list = self.client.users.method_calls[0][1]
+        self.assertEqual(call_list, ('username', 'password', 'default'))
+        adding_to_tenant_call_list = self.client.tenants.method_calls
+        self.assertEqual(adding_to_tenant_call_list, [])
+
+    def test_create_users_with_full_tenant_info(self):
+        self.invoke('cfy users create username -p password -t\
+                    test_tenant -l test_user')
+        user_create_call_list = self.client.users.method_calls[0][1]
+        self.assertEqual(user_create_call_list,
+                         ('username', 'password', 'default'))
+        adding_to_tenant_call_list = self.client.tenants.method_calls[0][1]
+        self.assertEqual(adding_to_tenant_call_list,
+                         ('username', 'test_tenant', 'test_user'))
+
+    def test_create_users_with_full_tenant_info_long_flags_names(self):
+        self.invoke('cfy users create username -p password --tenant-name\
+                    test_tenant --user-tenant-role test_user')
+        user_create_call_list = self.client.users.method_calls[0][1]
+        self.assertEqual(user_create_call_list,
+                         ('username', 'password', 'default'))
+        adding_to_tenant_call_list = self.client.tenants.method_calls[0][1]
+        self.assertEqual(adding_to_tenant_call_list,
+                         ('username', 'test_tenant', 'test_user'))
+
+    def test_create_fail_users_with_tenant_name_only(self):
+        self.invoke('cfy users create username -p password -t default')
+        user_create_call_list = self.client.users.method_calls[0][1]
+        self.assertEqual(user_create_call_list,
+                         ('username', 'password', 'default'))
+        adding_to_tenant_call_list = self.client.tenants.method_calls
+        self.assertEqual(adding_to_tenant_call_list, [])
+
+    def test_create_fail_users_with_user_tenant_role_only(self):
+        self.invoke('cfy users create username -p password -l user')
+        user_create_call_list = self.client.users.method_calls[0][1]
+        self.assertEqual(user_create_call_list,
+                         ('username', 'password', 'default'))
+        adding_to_tenant_call_list = self.client.tenants.method_calls
+        self.assertEqual(adding_to_tenant_call_list, [])

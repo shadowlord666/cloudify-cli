@@ -16,14 +16,21 @@
 
 from .. import env
 from ..cli import cfy
-from ..table import print_data
+from ..table import print_data, print_single
 from ..utils import handle_client_error
 
-GROUP_COLUMNS = ['name', 'tenants', 'users']
+GROUP_COLUMNS = ['name', 'role', 'tenants', 'users']
+
+
+def _format_group(group):
+    tenants = dict((str(tenant), str(group['tenants'][tenant]))
+                   for tenant in group['tenants'])
+    group['tenants'] = str(tenants).strip('{}')
+    return group
 
 
 @cfy.group(name='user-groups')
-@cfy.options.verbose()
+@cfy.options.common_options
 def user_groups():
     """Handle Cloudify user groups (Premium feature)
     """
@@ -35,37 +42,61 @@ def user_groups():
                      short_help='List user groups [manager only]')
 @cfy.options.sort_by('name')
 @cfy.options.descending
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.get_data
+@cfy.options.search
+@cfy.options.pagination_offset
+@cfy.options.pagination_size
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
-def list(sort_by, descending, get_data, logger, client):
+def list(sort_by,
+         descending,
+         get_data,
+         search,
+         pagination_offset,
+         pagination_size,
+         logger,
+         client):
     """List all user groups
     """
     logger.info('Listing all user groups...')
     user_groups_list = client.user_groups.list(
         sort=sort_by,
         is_descending=descending,
-        _get_data=get_data
+        _get_data=get_data,
+        _search=search,
+        _offset=pagination_offset,
+        _size=pagination_size
     )
+    total = user_groups_list.metadata.pagination.total
+    if get_data:
+        user_groups_list = [_format_group(group) for group in user_groups_list]
     print_data(GROUP_COLUMNS, user_groups_list, 'User groups:')
+    logger.info('Showing {0} of {1} user groups'.format(len(user_groups_list),
+                                                        total))
 
 
 @user_groups.command(name='create',
                      short_help='Create a user group [manager only]')
 @cfy.argument('user-group-name', callback=cfy.validate_name)
 @cfy.options.ldap_distinguished_name
-@cfy.options.verbose()
+@cfy.options.security_role
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
-def create(user_group_name, ldap_distinguished_name, logger, client):
+def create(user_group_name,
+           ldap_distinguished_name,
+           security_role,
+           logger,
+           client):
     """Create a new user group on the manager
 
     `USER_GROUP_NAME` is the name of the new user group
     """
     client.user_groups.create(user_group_name,
+                              security_role,
                               ldap_group_dn=ldap_distinguished_name)
     logger.info('Group `{0}` created'.format(user_group_name))
 
@@ -74,7 +105,7 @@ def create(user_group_name, ldap_distinguished_name, logger, client):
                      short_help='Get details for a single '
                                 'user group [manager only]')
 @cfy.argument('user-group-name', callback=cfy.validate_name)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.get_data
 @cfy.assert_manager_active()
 @cfy.pass_client()
@@ -89,14 +120,35 @@ def get(user_group_name, get_data, logger, client):
         user_group_name,
         _get_data=get_data
     )
-    print_data(GROUP_COLUMNS, user_group_details, 'Requested user group info:')
+    if get_data:
+        _format_group(user_group_details)
+    print_single(GROUP_COLUMNS, user_group_details,
+                 'Requested user group info:')
+
+
+@user_groups.command(name='set-role',
+                     short_help='Set a new role for a group [manager only]')
+@cfy.argument('user-group-name', callback=cfy.validate_name)
+@cfy.options.security_role
+@cfy.options.common_options
+@cfy.assert_manager_active()
+@cfy.pass_client()
+@cfy.pass_logger
+def set_role(user_group_name, security_role, logger, client):
+    """Set a new role for a group
+
+    `USER_GROUP_NAME` is the name of the user group
+    """
+    logger.info('Setting new role for group {0}...'.format(user_group_name))
+    client.user_groups.set_role(user_group_name, security_role)
+    logger.info('New role `{0}` set'.format(security_role))
 
 
 @user_groups.command(name='add-user',
                      short_help='Add a user to a user group [manager only]')
 @cfy.argument('username', callback=cfy.validate_name)
 @cfy.options.group_name
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -118,7 +170,7 @@ def add_user(username, group_name, logger, client):
     short_help='Remove a user from a user group [manager only]')
 @cfy.argument('username', callback=cfy.validate_name)
 @cfy.options.group_name
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -138,7 +190,7 @@ def remove_user(username, group_name, logger, client):
 @user_groups.command(name='delete',
                      short_help='Delete a user group [manager only]')
 @cfy.argument('user_group-name', callback=cfy.validate_name)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger

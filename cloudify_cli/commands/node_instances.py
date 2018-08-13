@@ -21,16 +21,17 @@ from cloudify_rest_client.exceptions import CloudifyClientError
 from .. import utils
 from ..cli import cfy
 from ..local import load_env
-from ..table import print_data
+from ..logger import get_global_json_output
+from ..table import print_data, print_details, print_single
 from ..exceptions import CloudifyCliError
 
 
 NODE_INSTANCE_COLUMNS = ['id', 'deployment_id', 'host_id', 'node_id', 'state',
-                         'permission', 'tenant_name', 'created_by']
+                         'visibility', 'tenant_name', 'created_by']
 
 
 @cfy.group(name='node-instances')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 def manager():
     """Handle a deployment's node-instances
@@ -42,7 +43,7 @@ def manager():
                  short_help='Retrieve node-instance information '
                  '[manager only]')
 @cfy.argument('node_instance_id')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.tenant_name(
     required=False, resource_name_for_help='node-instance')
 @cfy.pass_logger
@@ -52,8 +53,7 @@ def get(node_instance_id, logger, client, tenant_name):
 
     `NODE_INSTANCE_ID` is the id of the node-instance to get information on.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     logger.info('Retrieving node instance {0}'.format(node_instance_id))
     try:
         node_instance = client.node_instances.get(node_instance_id)
@@ -63,13 +63,22 @@ def get(node_instance_id, logger, client, tenant_name):
         raise CloudifyCliError('Node instance {0} not found'.format(
             node_instance_id))
 
-    print_data(NODE_INSTANCE_COLUMNS, node_instance, 'Node-instance:', 50)
+    # decode in-place so that it's decoded for both branches
+    node_instance.runtime_properties.update(
+        utils.decode_dict(node_instance.runtime_properties))
 
-    # print node instance runtime properties
-    logger.info('Instance runtime properties:')
-    for prop_name, prop_value in utils.decode_dict(
-            node_instance.runtime_properties).iteritems():
-        logger.info('\t{0}: {1}'.format(prop_name, prop_value))
+    if get_global_json_output():
+        # for json output, make sure runtime properties are in the same object
+        # so that the output is a single decode-able object
+        columns = NODE_INSTANCE_COLUMNS + ['runtime_properties']
+        print_single(columns, node_instance, 'Node-instance:', 50)
+    else:
+        print_single(NODE_INSTANCE_COLUMNS, node_instance,
+                     'Node-instance:', 50)
+
+        print_details(node_instance.runtime_properties,
+                      'Instance runtime properties:')
+
     logger.info('')
 
 
@@ -83,7 +92,10 @@ def get(node_instance_id, logger, client, tenant_name):
 @cfy.options.tenant_name_for_list(
     required=False, resource_name_for_help='node-instance')
 @cfy.options.all_tenants
-@cfy.options.verbose()
+@cfy.options.search
+@cfy.options.pagination_offset
+@cfy.options.pagination_size
+@cfy.options.common_options
 @cfy.pass_logger
 @cfy.pass_client()
 def list(deployment_id,
@@ -91,6 +103,9 @@ def list(deployment_id,
          sort_by,
          descending,
          all_tenants,
+         search,
+         pagination_offset,
+         pagination_size,
          logger,
          client,
          tenant_name):
@@ -99,8 +114,7 @@ def list(deployment_id,
     If `DEPLOYMENT_ID` is provided, list node-instances for that deployment.
     Otherwise, list node-instances for all deployments.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     try:
         if deployment_id:
             logger.info('Listing instances for deployment {0}...'.format(
@@ -112,7 +126,10 @@ def list(deployment_id,
             node_name=node_name,
             sort=sort_by,
             is_descending=descending,
-            _all_tenants=all_tenants)
+            _all_tenants=all_tenants,
+            _search=search,
+            _offset=pagination_offset,
+            _size=pagination_size)
     except CloudifyClientError as e:
         if e.status_code != 404:
             raise
@@ -120,13 +137,16 @@ def list(deployment_id,
             deployment_id))
 
     print_data(NODE_INSTANCE_COLUMNS, node_instances, 'Node-instances:')
+    total = node_instances.metadata.pagination.total
+    logger.info('Showing {0} of {1} node-instances'
+                .format(len(node_instances), total))
 
 
 @cfy.command(name='node-instances',
              short_help='Show node-instance information [locally]')
 @cfy.argument('node-id', required=False)
 @cfy.options.blueprint_id(required=True, multiple_blueprints=True)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def local(node_id, blueprint_id, logger):
     """Display node-instances for the execution

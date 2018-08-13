@@ -32,7 +32,7 @@ from ..ssh import run_command_on_manager, test_profile
 @cfy.options.host_session
 @cfy.options.session_id
 @cfy.options.list_sessions
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_logger
 def ssh(command, host, sid, list_sessions, logger):
@@ -117,7 +117,7 @@ def _open_interactive_shell(host_string, command=''):
 def _verify_tmux_exists_on_manager(host_string):
     try:
         run_command_on_manager('which tmux', host_string=host_string)
-    except:
+    except Exception:
         raise CloudifyCliError(
             'tmux executable not found on manager {0}.\n'
             'Please verify that tmux is installed and in PATH before '
@@ -176,7 +176,7 @@ def _get_all_sessions(logger, host_string):
         output = run_command_on_manager(
             'tmux list-sessions',
             host_string=host_string)
-    except:
+    except Exception:
         return None
     return output
 

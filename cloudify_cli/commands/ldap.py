@@ -17,7 +17,7 @@ from ..cli import cfy
 
 
 @cfy.group(name='ldap')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 def ldap():
     """Set LDAP authenticator.
@@ -51,3 +51,11 @@ def set(ldap_server,
                     ldap_domain=ldap_domain,
                     ldap_dn_extra=ldap_dn_extra)
     logger.info('LDAP authentication set successfully')
+
+
+@ldap.command(name='status',
+              short_help='Get the manager LDAP status (enabled/disabled).')
+@cfy.pass_client()
+@cfy.pass_logger
+def status(client, logger):
+    logger.info(client.ldap.get_status())

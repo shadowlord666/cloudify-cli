@@ -1,14 +1,17 @@
 import os
+import json
 import yaml
 import tempfile
-from mock import MagicMock, patch
+from mock import Mock, MagicMock, patch
 
 from cloudify.exceptions import CommandExecutionException
 from ..cfy import ClickInvocationException
 
 from ... import env
 from ...config import config
+from .mocks import MockListResponse
 from .test_base import CliCommandTest
+from cloudify_cli.exceptions import CloudifyCliError
 from .constants import BLUEPRINTS_DIR, SAMPLE_BLUEPRINT_PATH, \
     SAMPLE_ARCHIVE_PATH
 
@@ -20,7 +23,9 @@ class BlueprintsTest(CliCommandTest):
         self.use_manager()
 
     def test_blueprints_list(self):
-        self.client.blueprints.list = MagicMock(return_value=[])
+        self.client.blueprints.list = MagicMock(
+            return_value=MockListResponse()
+        )
         self.invoke('blueprints list')
         self.invoke('blueprints list -t dummy_tenant')
         self.invoke('cfy blueprints list -a')
@@ -31,10 +36,10 @@ class BlueprintsTest(CliCommandTest):
     @patch('cloudify_cli.table.generate')
     def test_blueprints_list_with_values(self, table_generate_mock):
         self.client.blueprints.list = MagicMock(
-            return_value=[
+            return_value=MockListResponse(items=[
                 {'description': '12345678901234567890123'},
                 {'description': 'abcdefg'}
-            ]
+            ])
         )
         self.invoke('blueprints list')
 
@@ -45,7 +50,7 @@ class BlueprintsTest(CliCommandTest):
                 'main_file_name',
                 'created_at',
                 'updated_at',
-                'permission',
+                'visibility',
                 'tenant_name',
                 'created_by'
             ],
@@ -68,12 +73,47 @@ class BlueprintsTest(CliCommandTest):
         outcome = self.invoke('blueprints download a-blueprint-id')
         self.assertIn('Blueprint downloaded as test', outcome.logs)
 
-    @patch('cloudify_cli.table.generate', autospec=True)
-    @patch('cloudify_cli.table.log', autospec=True)
     def test_blueprints_get(self, *args):
-        self.client.blueprints.get = MagicMock()
-        self.client.deployments.list = MagicMock()
-        self.invoke('blueprints get a-blueprint-id')
+        deployment_id = 'deployment id 1'
+        metadata_value = 'value 1'
+        description = 'blueprint description 1'
+        self.client.blueprints.get = Mock(return_value={
+            'id': 'a-blueprint-id',
+            'description': description,
+            'plan': {
+                'metadata': {
+                    'key1': metadata_value
+                }
+            }
+        })
+        self.client.deployments.list = Mock(return_value=[
+            {'id': deployment_id}
+        ])
+        outcome = self.invoke('blueprints get a-blueprint-id')
+        for expected in [deployment_id, metadata_value, description]:
+            self.assertIn(expected, outcome.output)
+
+    def test_blueprints_get_json(self, *args):
+        deployment_id = 'deployment id 1'
+        metadata_value = 'value 1'
+        description = 'blueprint description 1'
+        self.client.blueprints.get = Mock(return_value={
+            'id': 'a-blueprint-id',
+            'description': description,
+            'plan': {
+                'metadata': {
+                    'key1': metadata_value
+                }
+            }
+        })
+        self.client.deployments.list = Mock(return_value=[
+            {'id': deployment_id}
+        ])
+        outcome = self.invoke('blueprints get a-blueprint-id --json')
+        parsed = json.loads(outcome.output)
+        self.assertEqual(parsed['description'], description)
+        self.assertEqual(parsed['metadata'], {'key1': metadata_value})
+        self.assertEqual(parsed['deployments'], [deployment_id])
 
     def test_blueprints_upload(self):
         self.client.blueprints.upload = MagicMock()
@@ -128,15 +168,15 @@ class BlueprintsTest(CliCommandTest):
     def test_blueprints_upload_from_url(self):
         self.client.blueprints.publish_archive = MagicMock()
         self.invoke(
-                'cfy blueprints upload https://aaa.com/maste.tar.gz -n b.yaml '
-                '-b blueprint3')
+            'cfy blueprints upload https://aaa.com/maste.tar.gz -n b.yaml '
+            '-b blueprint3')
 
     def test_blueprints_upload_from_github(self):
         mocked = MagicMock()
         self.client.blueprints.publish_archive = mocked
         self.invoke(
-                'cfy blueprints upload organization/repo -n b.yaml '
-                '-b blueprint3')
+            'cfy blueprints upload organization/repo -n b.yaml '
+            '-b blueprint3')
         self.assertIn('github.com', mocked.call_args[0][0])
 
     def test_blueprint_validate(self):
@@ -160,7 +200,7 @@ class BlueprintsTest(CliCommandTest):
             'cfy blueprints validate '
             '{0}/local/blueprint_validate_definitions_version.yaml'
             .format(BLUEPRINTS_DIR),
-            err_str_segment='Failed to validate blueprint description'
+            err_str_segment='Failed to validate blueprint: description'
         )
 
     def test_validate_bad_blueprint(self):
@@ -168,6 +208,12 @@ class BlueprintsTest(CliCommandTest):
             'cfy blueprints validate {0}/bad_blueprint/blueprint.yaml'
             .format(BLUEPRINTS_DIR),
             err_str_segment='Failed to validate blueprint')
+
+    def test_validate_plugin_repository(self):
+        self.invoke(
+            'cfy blueprints validate {0}/bad_blueprint/plugin_repo.yaml'
+            .format(BLUEPRINTS_DIR),
+            err_str_segment='plugin repository')
 
     def test_blueprint_inputs(self):
 
@@ -287,3 +333,60 @@ class BlueprintsTest(CliCommandTest):
         )
 
         self.assertIn('pip install -r', output.exception.command)
+
+    def test_blueprints_set_global(self):
+        self.client.blueprints.set_global = MagicMock()
+        self.invoke('cfy blueprints set-global a-blueprint-id')
+
+    def test_blueprints_set_visibility(self):
+        self.client.blueprints.set_visibility = MagicMock()
+        self.invoke('cfy blueprints set-visibility a-blueprint-id -l '
+                    'global')
+
+    def test_blueprints_set_visibility_invalid_argument(self):
+        self.invoke(
+            'cfy blueprints set-visibility a-blueprint-id -l private',
+            err_str_segment='Invalid visibility: `private`',
+            exception=CloudifyCliError
+        )
+
+    def test_blueprints_set_visibility_missing_argument(self):
+        outcome = self.invoke(
+            'cfy blueprints set-visibility a-blueprint-id',
+            err_str_segment='2',
+            exception=SystemExit
+        )
+        self.assertIn('Missing option "-l" / "--visibility"', outcome.output)
+
+    def test_blueprints_set_visibility_wrong_argument(self):
+        outcome = self.invoke(
+            'cfy blueprints set-visibility a-blueprint-id -g',
+            err_str_segment='2',
+            exception=SystemExit
+        )
+        self.assertIn('Error: no such option: -g', outcome.output)
+
+    def test_blueprints_upload_mutually_exclusive_arguments(self):
+        outcome = self.invoke(
+            'cfy blueprints upload {0}/bad_blueprint/blueprint.yaml '
+            '-b my_blueprint_id --private-resource -l tenant'
+            .format(BLUEPRINTS_DIR),
+            err_str_segment='2',  # Exit code
+            exception=SystemExit
+        )
+        self.assertIn('mutually exclusive with arguments:', outcome.output)
+
+    def test_blueprints_upload_invalid_argument(self):
+        self.invoke(
+            'cfy blueprints upload {0}/bad_blueprint/blueprint.yaml '
+            '-b my_blueprint_id -l bla'
+            .format(BLUEPRINTS_DIR),
+            err_str_segment='Invalid visibility: `bla`',
+            exception=CloudifyCliError
+        )
+
+    def test_blueprints_upload_with_visibility(self):
+        self.client.blueprints.upload = MagicMock()
+        self.invoke('cfy blueprints upload {0} -b my_blueprint_id '
+                    '--blueprint-filename blueprint.yaml -l private'
+                    .format(SAMPLE_ARCHIVE_PATH))

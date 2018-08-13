@@ -14,9 +14,7 @@
 # limitations under the License.
 ############
 
-
 from . import env
-from . import logger
 from .cli import cfy
 from .commands import dev
 from .commands import ssh
@@ -30,15 +28,13 @@ from .commands import agents
 from .commands import events
 from .commands import groups
 from .commands import status
+from .commands import tokens
 from .commands import cluster
 from .commands import install
 from .commands import plugins
 from .commands import tenants
 from .commands import secrets
-from .commands import teardown
 from .commands import profiles
-from .commands import rollback
-from .commands import bootstrap
 from .commands import snapshots
 from .commands import uninstall
 from .commands import workflows
@@ -53,6 +49,7 @@ from .commands import maintenance_mode
 @cfy.group(name='cfy')
 @cfy.options.verbose(expose_value=True)
 @cfy.options.version
+@cfy.options.json
 def _cfy(verbose):
     """Cloudify's Command Line Interface
 
@@ -80,7 +77,6 @@ def _register_commands():
     _cfy.add_command(init.init)
     _cfy.add_command(status.status)
     _cfy.add_command(profiles.profiles)
-    _cfy.add_command(bootstrap.bootstrap)
 
     # Manager only commands
     _cfy.add_command(dev.dev)
@@ -94,13 +90,11 @@ def _register_commands():
     _cfy.add_command(cluster.cluster)
     _cfy.add_command(plugins.plugins)
     _cfy.add_command(tenants.tenants)
-    _cfy.add_command(teardown.teardown)
-    _cfy.add_command(rollback.rollback)
     _cfy.add_command(snapshots.snapshots)
     _cfy.add_command(user_groups.user_groups)
     _cfy.add_command(maintenance_mode.maintenance_mode)
     _cfy.add_command(secrets.secrets)
-
+    _cfy.add_command(tokens.tokens)
     _cfy.add_command(nodes.nodes)
     _cfy.add_command(groups.groups)
 
@@ -113,6 +107,9 @@ def _register_commands():
     deployments.deployments.add_command(deployments.manager_delete)
     deployments.deployments.add_command(deployments.manager_update)
     deployments.deployments.add_command(deployments.manager_list)
+    deployments.deployments.add_command(deployments.manager_history)
+    deployments.deployments.add_command(deployments.manager_get_update)
+    deployments.deployments.add_command(deployments.manager_set_visibility)
 
     executions.executions.add_command(executions.manager_cancel)
     executions.executions.add_command(executions.manager_list)
@@ -141,7 +138,6 @@ def _register_commands():
 
 
 _register_commands()
-logger.configure_loggers()
 
 
 if __name__ == '__main__':

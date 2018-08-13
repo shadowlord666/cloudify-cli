@@ -21,10 +21,11 @@ from cloudify_rest_client import exceptions
 
 from .. import local
 from .. import utils
-from ..table import print_data
+from ..table import print_data, print_single, print_details
+from ..utils import get_deployment_environment_execution
 from ..cli import cfy, helptexts
-from ..logger import get_events_logger
-from ..constants import DEFAULT_UNINSTALL_WORKFLOW
+from ..logger import get_events_logger, get_global_json_output
+from ..constants import DEFAULT_UNINSTALL_WORKFLOW, CREATE_DEPLOYMENT
 from ..execution_events_fetcher import wait_for_execution
 from ..exceptions import CloudifyCliError, ExecutionTimeoutError, \
     SuppressedCloudifyCliError
@@ -33,13 +34,18 @@ _STATUS_CANCELING_MESSAGE = (
     'NOTE: Executions currently in a "canceling/force-canceling" status '
     'may take a while to change into "cancelled"')
 
-EXECUTION_COLUMNS = ['id', 'workflow_id', 'status', 'deployment_id',
-                     'created_at', 'error', 'permission', 'tenant_name',
-                     'created_by']
+FULL_EXECUTION_COLUMNS = ['id', 'workflow_id', 'status_display',
+                          'deployment_id', 'created_at', 'ended_at',
+                          'error', 'visibility', 'tenant_name',
+                          'created_by']
+MINIMAL_EXECUTION_COLUMNS = ['id', 'workflow_id', 'status_display',
+                             'deployment_id', 'created_at', 'error',
+                             'visibility', 'tenant_name', 'created_by']
+EXECUTION_TABLE_LABELS = {'status_display': 'status'}
 
 
 @cfy.group(name='executions')
-@cfy.options.verbose()
+@cfy.options.common_options
 def executions():
     """Handle workflow executions
     """
@@ -49,7 +55,7 @@ def executions():
 @cfy.command(name='get',
              short_help='Retrieve execution information [manager only]')
 @cfy.argument('execution-id')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.tenant_name(required=False, resource_name_for_help='execution')
 @cfy.assert_manager_active()
 @cfy.pass_client()
@@ -59,8 +65,7 @@ def manager_get(execution_id, logger, client, tenant_name):
 
     `EXECUTION_ID` is the execution to get information on.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     try:
         logger.info('Retrieving execution {0}'.format(execution_id))
         execution = client.executions.get(execution_id)
@@ -69,13 +74,14 @@ def manager_get(execution_id, logger, client, tenant_name):
             raise
         raise CloudifyCliError('Execution {0} not found'.format(execution_id))
 
-    print_data(EXECUTION_COLUMNS, execution, 'Execution:', max_width=50)
+    columns = FULL_EXECUTION_COLUMNS
+    if get_global_json_output():
+        columns += ['parameters']
+    print_single(columns, execution, 'Execution:', max_width=50,
+                 labels=EXECUTION_TABLE_LABELS)
 
-    # print execution parameters
-    logger.info('Execution Parameters:')
-    for param_name, param_value in utils.decode_dict(
-            execution.parameters).iteritems():
-        logger.info('\t{0}: \t{1}'.format(param_name, param_value))
+    if not get_global_json_output():
+        print_details(execution.parameters, 'Execution Parameters:')
     if execution.status in (execution.CANCELLING, execution.FORCE_CANCELLING):
         logger.info(_STATUS_CANCELING_MESSAGE)
     logger.info('')
@@ -90,7 +96,9 @@ def manager_get(execution_id, logger, client, tenant_name):
 @cfy.options.tenant_name_for_list(
     required=False, resource_name_for_help='execution')
 @cfy.options.all_tenants
-@cfy.options.verbose()
+@cfy.options.pagination_offset
+@cfy.options.pagination_size
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -100,6 +108,8 @@ def manager_list(
         sort_by,
         descending,
         all_tenants,
+        pagination_offset,
+        pagination_size,
         logger,
         client,
         tenant_name):
@@ -108,8 +118,7 @@ def manager_list(
     If `DEPLOYMENT_ID` is provided, list executions for that deployment.
     Otherwise, list executions for all deployments.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     try:
         if deployment_id:
             logger.info('Listing executions for deployment {0}...'.format(
@@ -121,7 +130,10 @@ def manager_list(
             include_system_workflows=include_system_workflows,
             sort=sort_by,
             is_descending=descending,
-            _all_tenants=all_tenants)
+            _all_tenants=all_tenants,
+            _offset=pagination_offset,
+            _size=pagination_size
+        )
 
     except exceptions.CloudifyClientError as e:
         if e.status_code != 404:
@@ -129,7 +141,10 @@ def manager_list(
         raise CloudifyCliError('Deployment {0} does not exist'.format(
             deployment_id))
 
-    print_data(EXECUTION_COLUMNS, executions, 'Executions:')
+    print_data(MINIMAL_EXECUTION_COLUMNS, executions, 'Executions:',
+               labels=EXECUTION_TABLE_LABELS)
+    total = executions.metadata.pagination.total
+    logger.info('Showing {0} of {1} executions'.format(len(executions), total))
 
     if any(execution.status in (
             execution.CANCELLING, execution.FORCE_CANCELLING)
@@ -147,7 +162,8 @@ def manager_list(
 @cfy.options.timeout()
 @cfy.options.include_logs
 @cfy.options.json_output
-@cfy.options.verbose()
+@cfy.options.dry_run
+@cfy.options.common_options
 @cfy.options.tenant_name(required=False, resource_name_for_help='execution')
 @cfy.assert_manager_active()
 @cfy.pass_client()
@@ -160,6 +176,7 @@ def manager_start(workflow_id,
                   timeout,
                   include_logs,
                   json_output,
+                  dry_run,
                   logger,
                   client,
                   tenant_name):
@@ -167,8 +184,7 @@ def manager_start(workflow_id,
 
     `WORKFLOW_ID` is the id of the workflow to execute (e.g. `uninstall`)
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
+    utils.explicit_tenant_name_message(tenant_name, logger)
     events_logger = get_events_logger(json_output)
     events_message = "* Run 'cfy events list -e {0}' to retrieve the " \
                      "execution's events/logs"
@@ -185,7 +201,8 @@ def manager_start(workflow_id,
                 workflow_id,
                 parameters=parameters,
                 allow_custom_parameters=allow_custom_parameters,
-                force=force)
+                force=force,
+                dry_run=dry_run)
         except (exceptions.DeploymentEnvironmentCreationInProgressError,
                 exceptions.DeploymentEnvironmentCreationPendingError) as e:
             # wait for deployment environment creation workflow
@@ -202,8 +219,8 @@ def manager_start(workflow_id,
                          'workflow execution to finish...')
             now = time.time()
             wait_for_execution(client,
-                               _get_deployment_environment_creation_execution(
-                                   client, deployment_id),
+                               get_deployment_environment_execution(
+                                   client, deployment_id, CREATE_DEPLOYMENT),
                                events_handler=events_logger,
                                include_logs=include_logs,
                                timeout=timeout)
@@ -221,7 +238,8 @@ def manager_start(workflow_id,
                                        execution,
                                        events_handler=events_logger,
                                        include_logs=include_logs,
-                                       timeout=timeout)
+                                       timeout=timeout,
+                                       logger=logger)
         if execution.error:
             logger.info('Execution of workflow {0} for deployment '
                         '{1} failed. [error={2}]'.format(
@@ -257,7 +275,7 @@ def manager_start(workflow_id,
             " the running workflow.".format(
                 workflow_id, deployment_id, e.execution_id, original_timeout))
 
-        events_tail_message = "* Run 'cfy events list --tail --include-logs " \
+        events_tail_message = "* Run 'cfy events list --tail " \
                               "--execution-id {0}' to retrieve the " \
                               "execution's events/logs"
         logger.info(events_tail_message.format(e.execution_id))
@@ -267,36 +285,31 @@ def manager_start(workflow_id,
 @cfy.command(name='cancel',
              short_help='Cancel a workflow execution [manager only]')
 @cfy.argument('execution-id')
+@cfy.options.common_options
 @cfy.options.force(help=helptexts.FORCE_CANCEL_EXECUTION)
-@cfy.options.verbose()
+@cfy.options.kill()
 @cfy.options.tenant_name(required=False, resource_name_for_help='execution')
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
-def manager_cancel(execution_id, force, logger, client, tenant_name):
+def manager_cancel(execution_id, force, kill, logger, client, tenant_name):
     """Cancel a workflow's execution
 
     `EXECUTION_ID` is the ID of the execution to cancel.
     """
-    if tenant_name:
-        logger.info('Explicitly using tenant `{0}`'.format(tenant_name))
-    logger.info('{0}Cancelling execution {1}'.format(
-        'Force-' if force else '', execution_id))
-    client.executions.cancel(execution_id, force)
+    utils.explicit_tenant_name_message(tenant_name, logger)
+    if kill:
+        message = 'Killing'
+    elif force:
+        message = 'Force-cancelling'
+    else:
+        message = 'Cancelling'
+    logger.info('{0} execution {1}'.format(message, execution_id))
+    client.executions.cancel(execution_id, force=force, kill=kill)
     logger.info(
         "A cancel request for execution {0} has been sent. "
         "To track the execution's status, use:\n"
         "cfy executions get {0}".format(execution_id))
-
-
-def _get_deployment_environment_creation_execution(client, deployment_id):
-    executions = client.executions.list(deployment_id=deployment_id)
-    for execution in executions:
-        if execution.workflow_id == 'create_deployment_environment':
-            return execution
-    raise RuntimeError('Failed to get create_deployment_environment '
-                       'workflow execution.'
-                       'Available executions: {0}'.format(executions))
 
 
 @cfy.command(name='start',
@@ -308,7 +321,7 @@ def _get_deployment_environment_creation_execution(client, deployment_id):
 @cfy.options.task_retries()
 @cfy.options.task_retry_interval()
 @cfy.options.task_thread_pool_size()
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def local_start(workflow_id,
                 blueprint_id,

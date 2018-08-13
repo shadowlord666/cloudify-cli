@@ -38,7 +38,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "source\python\*"; DestDir: "{app}\embedded" ;Flags: recursesubdirs
 Source: "source\wheels\*.whl"; Flags: dontcopy
 Source: "source\icons\Cloudify.ico"; DestDir: "{app}"
-Source: "source\blueprints\*"; DestDir: "{app}\cloudify-manager-blueprints"; Flags: recursesubdirs
 
 Source: "source\types\*"; DestDir: "{app}\cloudify\types"; Flags: recursesubdirs
 Source: "source\scripts\*"; DestDir: "{app}\cloudify\scripts"; Flags: recursesubdirs
@@ -106,7 +105,7 @@ var
   Status: Boolean;
   Index: Integer;
 begin
-  ConfigYamlPath := Expandconstant('{app}\embedded\Lib\site-packages\cloudify_cli\resources\config.yaml')
+  ConfigYamlPath := Expandconstant('{%HOMEPATH}\.cloudify\config.yaml')
   ExtractTemporaryFile('import_resolver.yaml');
   Status := LoadStringsFromFile(ExpandConstant('{tmp}\import_resolver.yaml'), MappingStrings);
 

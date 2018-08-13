@@ -9,8 +9,8 @@ from mock import MagicMock, patch
 from .. import cfy
 from ... import env
 from ... import utils
-from ... import constants
 from ...commands import profiles
+from .mocks import MockListResponse
 from .test_base import CliCommandTest
 
 
@@ -23,10 +23,10 @@ class ProfilesTest(CliCommandTest):
     def test_get_active_profile(self):
         self.use_manager()
         outcome = self.invoke('profiles show-current')
-        self.assertIn('manager_ip', outcome.logs)
-        self.assertIn('10.10.1.10', outcome.logs)
-        self.assertIn('rest_port', outcome.logs)
-        self.assertIn('80', outcome.logs)
+        self.assertIn('manager_ip', outcome.output)
+        self.assertIn('10.10.1.10', outcome.output)
+        self.assertIn('rest_port', outcome.output)
+        self.assertIn('80', outcome.output)
 
     def test_get_profile(self):
         self.use_manager()
@@ -41,10 +41,10 @@ class ProfilesTest(CliCommandTest):
     def test_list_profiles(self):
         self.use_manager()
         outcome = self.invoke('profiles list')
-        self.assertIn('manager_ip', outcome.logs)
-        self.assertIn('*10.10.1.10', outcome.logs)
-        self.assertIn('rest_port', outcome.logs)
-        self.assertIn('80', outcome.logs)
+        self.assertIn('manager_ip', outcome.output)
+        self.assertIn('*10.10.1.10', outcome.output)
+        self.assertIn('rest_port', outcome.output)
+        self.assertIn('80', outcome.output)
 
     def test_list_profiles_no_profiles(self):
         outcome = self.invoke('profiles list')
@@ -201,7 +201,9 @@ class ProfilesTest(CliCommandTest):
 
         # Setting the env variable should cause the invocation to fail
         os.environ[env_var] = temp_value
-        self.client.blueprints.list = MagicMock(return_value=[])
+        self.client.blueprints.list = MagicMock(
+            return_value=MockListResponse()
+        )
         self.invoke('blueprints list', err_str_segment=error_msg)
 
         # Unsetting the variable in the profile should fix this
@@ -291,12 +293,14 @@ class ProfilesTest(CliCommandTest):
     @patch('cloudify_cli.commands.profiles._validate_credentials')
     def test_set_works_without_skip(self, validate_credentials_mock):
         self.use_manager()
-        self.invoke('profiles set -u 0 -p 0 -t 0')
+        self.invoke('profiles set -u 0 -p 0 -t 0 -c 0')
 
-        validate_credentials_mock.assert_called_once_with('0', '0', '0')
+        validate_credentials_mock.assert_called_once_with('0', '0', '0', '0',
+                                                          None, None)
         self.assertEquals('0', env.profile.manager_username)
         self.assertEquals('0', env.profile.manager_password)
         self.assertEquals('0', env.profile.manager_tenant)
+        self.assertEquals('0', env.profile.rest_certificate)
 
     def test_cannot_set_name_local(self):
         self.use_manager()
@@ -334,9 +338,6 @@ class ProfilesTest(CliCommandTest):
 
     @patch('cloudify_cli.commands.profiles._get_provider_context',
            return_value={})
-    @patch('cloudify_cli.commands.profiles._get_rest_port_and_protocol',
-           return_value={constants.DEFAULT_REST_PORT,
-                         constants.DEFAULT_REST_PROTOCOL})
     def test_use_defaults_ip_to_profile_name(self, *_):
         outcome = self.invoke('profiles use 1.2.3.4')
         self.assertIn('Using manager 1.2.3.4', outcome.logs)
@@ -346,12 +347,41 @@ class ProfilesTest(CliCommandTest):
 
     @patch('cloudify_cli.commands.profiles._get_provider_context',
            return_value={})
-    @patch('cloudify_cli.commands.profiles._get_rest_port_and_protocol',
-           return_value={constants.DEFAULT_REST_PORT,
-                         constants.DEFAULT_REST_PROTOCOL})
     def test_use_sets_provided_manager_ip(self, *_):
         outcome = self.invoke('profiles use 1.2.3.4 --profile-name 5.6.7.8')
         self.assertIn('Using manager 1.2.3.4', outcome.logs)
         added_profile = env.get_profile_context('5.6.7.8')
         self.assertEqual('1.2.3.4', added_profile.manager_ip)
         self.assertEqual('5.6.7.8', added_profile.profile_name)
+
+    @patch('cloudify_cli.commands.profiles._get_provider_context',
+           return_value={})
+    def test_use_cannot_update_profile(self, *_):
+        self.use_manager()
+        outcome = self.invoke('profiles use 10.10.1.10 -p abc')
+        self.assertIn('The passed in options are ignored: manager_password',
+                      outcome.logs)
+
+    @patch('cloudify_cli.commands.profiles._get_provider_context',
+           return_value={})
+    def test_use_existing_only_switches(self, mock_get_context):
+        self.use_manager()
+        self.invoke('profiles use 10.10.1.10')
+        self.assertFalse(mock_get_context.called)
+
+    @patch('cloudify_cli.commands.profiles._get_provider_context',
+           return_value={})
+    def test_cluster_set_changes_cert(self, mock_get_context):
+        self.use_manager()
+        env.profile.cluster = [{'name': 'first'}]
+        self.invoke('profiles set-cluster first --rest-certificate CERT_PATH')
+        self.assertIn('cert', env.profile.cluster[0])
+        self.assertEqual(env.profile.cluster[0]['cert'], 'CERT_PATH')
+
+    @patch('cloudify_cli.commands.profiles._get_provider_context',
+           return_value={})
+    def test_cluster_set_nonexistent_node(self, mock_get_context):
+        self.use_manager()
+        env.profile.cluster = [{'name': 'first'}]
+        self.invoke('profiles set-cluster second --rest-certificate CERT_PATH',
+                    err_str_segment='second not found')

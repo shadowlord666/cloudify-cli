@@ -24,31 +24,29 @@ from cloudify_rest_client.exceptions import CloudifyClientError, \
 
 from . import init
 from .. import env
-from ..table import print_data
+from ..table import print_data, print_single
 from .. import utils
 from ..cli import cfy
 from .. import constants
 from ..cli import helptexts
-from ..bootstrap import bootstrap as bs
 from ..exceptions import CloudifyCliError
 
 EXPORTED_KEYS_DIRNAME = '.exported-ssh-keys'
 EXPORTED_SSH_KEYS_DIR = os.path.join(env.PROFILES_DIR, EXPORTED_KEYS_DIRNAME)
 PROFILE_COLUMNS = ['name', 'manager_ip', 'manager_username', 'manager_tenant',
                    'ssh_user', 'ssh_key_path', 'ssh_port',
-                   'rest_port', 'rest_protocol', 'rest_certificate',
-                   'bootstrap_state']
+                   'rest_port', 'rest_protocol', 'rest_certificate']
 
 
 @cfy.group(name='profiles')
-@cfy.options.verbose()
+@cfy.options.common_options
 def profiles():
     """Handle Cloudify CLI profiles
 
     Each profile can manage a single Cloudify manager.
 
-    A profile is automatically created when using the `cfy profiles use`,
-    and `cfy bootstrap` commands.
+    A profile is automatically created when using the `cfy profiles use`
+    command.
 
     Profiles are named according to the IP of the manager they manage.
     """
@@ -58,7 +56,7 @@ def profiles():
 
 @profiles.command(name='show-current',
                   short_help='Retrieve current profile information')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def show(logger):
     """Shows your current active profile and it's properties
@@ -66,17 +64,16 @@ def show(logger):
     active_profile_name = env.get_active_profile()
     if active_profile_name == 'local':
         logger.info("You're currently working in local mode. "
-                    "To use a manager run `cfy profiles use MANAGER_IP`"
-                    " or bootstrap one")
+                    "To use a manager run `cfy profiles use MANAGER_IP`")
         return
 
     active_profile = _get_profile(env.get_active_profile())
-    print_data(PROFILE_COLUMNS, active_profile, 'Active profile:')
+    print_single(PROFILE_COLUMNS, active_profile, 'Active profile:')
 
 
 @profiles.command(name='list',
                   short_help='List profiles')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def list(logger):
     """List all profiles
@@ -99,8 +96,7 @@ def list(logger):
     if not profile_names:
         logger.info(
             'No profiles found. You can create a new profile '
-            'by bootstrapping a manager via `cfy bootstrap` or using an '
-            'existing manager via the `cfy profiles use` command')
+            'by using an existing manager via the `cfy profiles use` command')
 
 
 @profiles.command(name='use',
@@ -114,22 +110,16 @@ def list(logger):
 @cfy.options.manager_password
 @cfy.options.manager_tenant
 @cfy.options.rest_port
+@cfy.options.ssl_rest
 @cfy.options.rest_certificate
 @cfy.options.skip_credentials_validation
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def use(manager_ip,
-        ssh_user,
-        ssh_key,
-        ssh_port,
-        manager_username,
-        manager_password,
-        manager_tenant,
         profile_name,
-        rest_port,
-        rest_certificate,
         skip_credentials_validation,
-        logger):
+        logger,
+        **kwargs):
     """Control a specific manager
 
     `PROFILE_NAME` can be either a manager IP or `local`.
@@ -146,18 +136,62 @@ def use(manager_ip,
         env.set_active_profile('local')
         return
 
-    logger.info('Attempting to connect...'.format(manager_ip))
+    if env.is_profile_exists(profile_name):
+        _switch_profile(
+            manager_ip=manager_ip,
+            profile_name=profile_name,
+            logger=logger,
+            **kwargs)
+    else:
+        _create_profile(
+            manager_ip=manager_ip,
+            profile_name=profile_name,
+            skip_credentials_validation=skip_credentials_validation,
+            logger=logger,
+            **kwargs)
 
-    rest_port, rest_protocol = _get_rest_port_and_protocol(
-        profile_name,
+
+def _switch_profile(manager_ip, profile_name, logger, **kwargs):
+    # if using an existing profile, it is an error to provide any --option,
+    # because the way to update an existing profile is `cfy profiles set`
+    provided_options = [key for key, value in kwargs.items() if value]
+    if any(provided_options):
+        logger.warning('Profile {0} already exists. '
+                       'The passed in options are ignored: {1}. '
+                       'To update the profile, use `cfy profiles set`'
+                       .format(profile_name, ', '.join(provided_options)))
+
+    env.set_active_profile(profile_name)
+    logger.info('Using manager {0}'.format(profile_name))
+
+
+def _create_profile(
         manager_ip,
-        rest_port,
-        rest_certificate,
+        profile_name,
+        ssh_user,
+        ssh_key,
+        ssh_port,
         manager_username,
         manager_password,
         manager_tenant,
-        skip_credentials_validation
-    )
+        rest_port,
+        ssl,
+        rest_certificate,
+        skip_credentials_validation,
+        logger):
+    # If REST certificate is provided, then automatically
+    # assume SSL.
+    if rest_certificate:
+        ssl = True
+
+    rest_protocol, default_rest_port = _get_ssl_protocol_and_port(ssl)
+    if not rest_port:
+        rest_port = default_rest_port
+
+    logger.info('Attempting to connect to {0} through port {1}, using {2} '
+                '(SSL mode: {3})...'.format(manager_ip, rest_port,
+                                            rest_protocol, ssl))
+
     # First, attempt to get the provider from the manager - should it fail,
     # the manager's profile directory won't be created
     provider_context = _get_provider_context(
@@ -172,9 +206,7 @@ def use(manager_ip,
         skip_credentials_validation
     )
 
-    if not env.is_profile_exists(profile_name):
-        init.init_manager_profile(profile_name=profile_name)
-
+    init.init_manager_profile(profile_name=profile_name)
     env.set_active_profile(profile_name)
 
     logger.info('Using manager {0} with port {1}'.format(
@@ -195,31 +227,11 @@ def use(manager_ip,
         rest_certificate
     )
 
-    # delete the previous manager deployment if exists.
-    bs.delete_workdir()
-
-
-@profiles.command(name='purge-incomplete',
-                  short_help='Purge profiles in incomplete bootstrap state')
-@cfy.options.verbose()
-@cfy.pass_logger
-def purge_incomplete(logger):
-    """Purge all profiles for which the bootstrap state is incomplete
-    """
-    logger.info('Purging incomplete bootstrap profiles...')
-    profile_names = env.get_profile_names()
-    for profile in profile_names:
-        context = env.get_profile_context(profile)
-        if context.bootstrap_state == 'Incomplete':
-            logger.debug('Deleteing profiles {0}...'.format(profile))
-            env.delete_profile(profile)
-    logger.info('Purge complete')
-
 
 @profiles.command(name='delete',
                   short_help='Delete a profile')
 @cfy.argument('profile-name')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def delete(profile_name, logger):
     """Delete a profile
@@ -249,7 +261,8 @@ def set_profile(profile_name,
     and/or ssl state (on/off) in the *current* profile
     """
     if not any([profile_name, ssh_user, ssh_key, ssh_port, manager_username,
-                manager_password, manager_tenant, ssl, rest_certificate]):
+                manager_password, manager_tenant, ssl is not None,
+                rest_certificate]):
         raise CloudifyCliError(
             "You must supply at least one of the following:  "
             "profile name, username, password, tenant, "
@@ -257,9 +270,11 @@ def set_profile(profile_name,
     username = manager_username or env.get_username()
     password = manager_password or env.get_password()
     tenant = manager_tenant or env.get_tenant_name()
+    protocol, port = _get_ssl_protocol_and_port(ssl)
 
     if not skip_credentials_validation:
-        _validate_credentials(username, password, tenant)
+        _validate_credentials(username, password, tenant, rest_certificate,
+                              protocol, port)
     old_name = None
     if profile_name:
         if profile_name == 'local':
@@ -279,17 +294,7 @@ def set_profile(profile_name,
         logger.info('Setting tenant to `{0}`'.format(manager_tenant))
         env.profile.manager_tenant = manager_tenant
     if ssl is not None:
-        ssl = str(ssl).lower()
-        if ssl == 'on':
-            logger.info('Enabling SSL in the local profile')
-            env.profile.rest_port = constants.SECURED_REST_PORT
-            env.profile.rest_protocol = constants.SECURED_REST_PROTOCOL
-        elif ssl == 'off':
-            logger.info('Disabling SSL in the local profile')
-            env.profile.rest_port = constants.DEFAULT_REST_PORT
-            env.profile.rest_protocol = constants.DEFAULT_REST_PROTOCOL
-        else:
-            raise CloudifyCliError('SSL must be either `on` or `off`')
+        _set_profile_ssl(ssl, logger)
     if rest_certificate:
         logger.info(
             'Setting rest certificate to `{0}`'.format(rest_certificate))
@@ -311,6 +316,35 @@ def set_profile(profile_name,
     logger.info('Settings saved successfully')
 
 
+def _set_profile_ssl(ssl, logger):
+    if ssl is None:
+        raise CloudifyCliError('Internal error: SSL must be either `on` or '
+                               '`off`')
+
+    protocol, port = _get_ssl_protocol_and_port(ssl)
+    if protocol == constants.SECURED_REST_PROTOCOL:
+        logger.info('Enabling SSL in the local profile')
+    else:
+        logger.info('Disabling SSL in the local profile')
+
+    env.profile.rest_port = port
+    env.profile.rest_protocol = protocol
+
+    if env.profile.cluster:
+        missing_certs = []
+        for node in env.profile.cluster:
+            node['rest_port'] = port
+            node['rest_protocol'] = protocol
+            logger.info('Enabling SSL for {0}'.format(node['manager_ip']))
+            if not node.get('cert'):
+                missing_certs.append(node['name'])
+        if missing_certs:
+            logger.warning('The following cluster nodes have no certificate '
+                           'set: {0}'.format(', '.join(missing_certs)))
+            logger.warning('If required, set the certificates for those '
+                           'nodes using `cfy profiles set-cluster`')
+
+
 @profiles.command(
     name='set',
     short_help='Set name/manager username/password/tenant in current profile')
@@ -320,11 +354,11 @@ def set_profile(profile_name,
 @cfy.options.manager_tenant
 @cfy.options.ssh_user
 @cfy.options.ssh_key
-@cfy.options.ssh_port_no_default
+@cfy.options.ssh_port
 @cfy.options.ssl_state
 @cfy.options.rest_certificate
 @cfy.options.skip_credentials_validation
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def set_cmd(profile_name,
             manager_username,
@@ -344,10 +378,66 @@ def set_cmd(profile_name,
                        ssh_user,
                        ssh_key,
                        ssh_port,
-                       ssl,
+                       _get_ssl_indication(ssl),
                        rest_certificate,
                        skip_credentials_validation,
                        logger)
+
+
+@profiles.command(
+    name='set-cluster',
+    short_help='Set connection options for a cluster node')
+@cfy.argument('cluster-node-name')
+@cfy.options.ssh_user
+@cfy.options.ssh_key
+@cfy.options.ssh_port
+@cfy.options.rest_certificate
+@cfy.pass_logger
+def set_cluster(cluster_node_name,
+                ssh_user,
+                ssh_key,
+                ssh_port,
+                rest_certificate,
+                logger):
+    """Set connection options for a cluster node.
+
+    `CLUSTER_NODE_NAME` is the name of the cluster node to set options for.
+    """
+    if not env.profile.cluster:
+        err = CloudifyCliError('The current profile is not a cluster profile!')
+        err.possible_solutions = [
+            "Select a different profile using `cfy profiles use`",
+            "Run `cfy cluster update-profile`"
+        ]
+        raise err
+
+    changed_node = None
+    for node in env.profile.cluster:
+        if node['name'] == cluster_node_name:
+            changed_node = node
+            break
+    else:
+        raise CloudifyCliError(
+            'Node {0} not found in the cluster'.format(cluster_node_name))
+
+    for source, target, label in [
+        (ssh_user, 'ssh_user', 'ssh user'),
+        (ssh_key, 'ssh_key', 'ssh key'),
+        (ssh_port, 'ssh_port', 'ssh port'),
+    ]:
+        if source:
+            changed_node[target] = source
+            logger.info('Node {0}: setting {1} to `{2}`'
+                        .format(cluster_node_name, label, source))
+    if rest_certificate:
+        changed_node['cert'] = rest_certificate
+        changed_node['trust_all'] = False
+        changed_node['rest_protocol'] = 'https'
+        logger.info('Node {0}: setting rest-certificate to `{1}` and enabling '
+                    'certificate verification'
+                    .format(cluster_node_name, source))
+    env.profile.save()
+    logger.info('Settings saved successfully')
 
 
 @profiles.command(
@@ -360,7 +450,7 @@ def set_cmd(profile_name,
 @cfy.options.ssh_key_flag
 @cfy.options.rest_certificate_flag
 @cfy.options.skip_credentials_validation
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def unset(manager_username,
           manager_password,
@@ -390,9 +480,15 @@ def unset(manager_username,
         tenant = os.environ.get(constants.CLOUDIFY_TENANT_ENV)
     else:
         tenant = env.profile.manager_tenant
+    if rest_certificate:
+        cert = os.environ.get(constants.LOCAL_REST_CERT_FILE) \
+            or env.get_default_rest_cert_local_path()
+    else:
+        cert = None
 
     if not skip_credentials_validation:
-        _validate_credentials(username, password, tenant)
+        _validate_credentials(username, password, tenant, cert,
+                              env.profile.rest_protocol, env.profile.rest_port)
 
     if manager_username:
         logger.info('Clearing manager username')
@@ -420,7 +516,7 @@ def unset(manager_username,
                   short_help='Export all profiles to an archive')
 @cfy.options.include_keys(helptexts.EXPORT_SSH_KEYS)
 @cfy.options.optional_output_path
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def export_profiles(include_keys, output_path, logger):
     """Export all profiles to a file
@@ -455,7 +551,7 @@ def export_profiles(include_keys, output_path, logger):
                   short_help='Import profiles from an archive')
 @cfy.argument('archive-path')
 @cfy.options.include_keys(helptexts.IMPORT_SSH_KEYS)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def import_profiles(archive_path, include_keys, logger):
     """Import profiles from a profiles archive
@@ -648,8 +744,6 @@ def _set_profile_context(profile_name,
         profile.ssh_key = ssh_key
     if ssh_user:
         profile.ssh_user = ssh_user
-    if ssh_port:
-        profile.ssh_port = ssh_port
     if rest_port:
         profile.rest_port = rest_port
     if manager_username:
@@ -658,52 +752,11 @@ def _set_profile_context(profile_name,
         profile.manager_password = manager_password
     if manager_tenant:
         profile.manager_tenant = manager_tenant
+    profile.ssh_port = ssh_port or constants.REMOTE_EXECUTION_PORT
     profile.rest_protocol = rest_protocol
     profile.rest_certificate = rest_certificate
-    profile.bootstrap_state = 'Complete'
 
     profile.save()
-
-
-def _get_rest_port_and_protocol(profile_name=None,
-                                manager_ip=None,
-                                rest_port=None,
-                                rest_certificate=None,
-                                manager_username=None,
-                                manager_password=None,
-                                manager_tenant=None,
-                                skip_credentials_validation=False):
-
-    # Determine SSL mode by port
-    if rest_port == constants.SECURED_REST_PORT:
-        return rest_port, constants.SECURED_REST_PROTOCOL
-
-    client = env.get_rest_client(
-        rest_host=manager_ip,
-        rest_port=rest_port,
-        rest_protocol=constants.DEFAULT_REST_PROTOCOL,
-        rest_cert=rest_certificate,
-        skip_version_check=True,
-        # we're sending a dummy request over HTTP unencrypted, so DO NOT
-        # send the actual credentials just yet
-        username='<invalid>',
-        password='<invalid>',
-        tenant_name='<invalid>',
-        client_profile=env.get_profile_context(profile_name=profile_name,
-                                               suppress_error=True)
-    )
-    # run a dummy request against HTTP, and see if it was redirected to HTTPS -
-    # if it was, the manager is secured - let's use HTTPS
-    try:
-        client.manager.get_status()
-    except UserUnauthorizedError as e:
-        if e.response is not None and _is_manager_secured(e.response.history):
-            return constants.SECURED_REST_PORT, constants.SECURED_REST_PROTOCOL
-    except Exception as e:
-        if not skip_credentials_validation:
-            raise
-
-    return rest_port, constants.DEFAULT_REST_PROTOCOL
 
 
 def _is_manager_secured(response_history):
@@ -720,13 +773,33 @@ def _is_manager_secured(response_history):
     return False
 
 
+def _get_ssl_indication(ssl):
+    if ssl is None:
+        return None
+    return str(ssl).lower() == 'on'
+
+
+def _get_ssl_protocol_and_port(ssl):
+    if ssl is not None:
+        protocol, port = (constants.SECURED_REST_PROTOCOL,
+                          constants.SECURED_REST_PORT) if ssl else \
+            (constants.DEFAULT_REST_PROTOCOL, constants.DEFAULT_REST_PORT)
+    else:
+        protocol, port = None, None
+    return protocol, port
+
+
 @cfy.pass_logger
-def _validate_credentials(username, password, tenant, logger):
+def _validate_credentials(username, password, tenant, certificate, protocol,
+                          rest_port, logger):
     logger.info('Validating credentials...')
     _get_client_and_assert_manager(
         profile_name=env.profile.profile_name,
         manager_username=username,
         manager_password=password,
-        manager_tenant=tenant
+        manager_tenant=tenant,
+        rest_certificate=certificate,
+        rest_protocol=protocol,
+        rest_port=rest_port
     )
     logger.info('Credentials validated')

@@ -19,24 +19,29 @@ import sys
 import urllib
 import difflib
 import StringIO
+import warnings
 import traceback
 from functools import wraps
 
 import click
+from cloudify_rest_client.constants import VisibilityState
 from cloudify_rest_client.exceptions import NotModifiedError
 from cloudify_rest_client.exceptions import CloudifyClientError
 from cloudify_rest_client.exceptions import MaintenanceModeActiveError
 from cloudify_rest_client.exceptions import MaintenanceModeActivatingError
 
-from .. import env
-from .. import constants
+from .. import env, logger
 from ..cli import helptexts
 from ..inputs import inputs_to_dict
 from ..utils import generate_random_string
 from ..constants import DEFAULT_BLUEPRINT_PATH
 from ..exceptions import SuppressedCloudifyCliError
 from ..exceptions import CloudifyBootstrapError, CloudifyValidationError
-from ..logger import get_logger, set_global_verbosity_level, DEFAULT_LOG_FILE
+from ..logger import (
+    get_logger,
+    set_global_verbosity_level,
+    DEFAULT_LOG_FILE,
+    set_global_json_output)
 
 
 CLICK_CONTEXT_SETTINGS = dict(
@@ -55,28 +60,21 @@ class MutuallyExclusiveOption(click.Option):
 
     def __init__(self, *args, **kwargs):
         self.mutually_exclusive = set(kwargs.pop('mutually_exclusive', []))
-        self.mutuality_error_message = \
-            kwargs.pop('mutuality_error_message',
-                       helptexts.DEFAULT_MUTUALITY_MESSAGE)
         self.mutuality_string = ', '.join(self.mutually_exclusive)
         if self.mutually_exclusive:
             help = kwargs.get('help', '')
             kwargs['help'] = (
-                '{0}. This argument is mutually exclusive with '
-                'arguments: [{1}] ({2})'.format(
-                    help,
-                    self.mutuality_string,
-                    self.mutuality_error_message))
+                '{0}. You cannot use this argument with arguments: [{1}]'
+                .format(help, self.mutuality_string)
+            )
         super(MutuallyExclusiveOption, self).__init__(*args, **kwargs)
 
     def handle_parse_result(self, ctx, opts, args):
         if self.mutually_exclusive.intersection(opts) and self.name in opts:
             raise click.UsageError(
                 'Illegal usage: `{0}` is mutually exclusive with '
-                'arguments: [{1}] ({2}).'.format(
-                    self.name,
-                    self.mutuality_string,
-                    self.mutuality_error_message))
+                'arguments: [{1}]'.format(self.name, self.mutuality_string)
+            )
         return super(MutuallyExclusiveOption, self).handle_parse_result(
             ctx, opts, args)
 
@@ -101,6 +99,12 @@ def _tenant_help_message(message, message_template, resource_name):
     if resource_name is not None:
         return message_template.format(resource_name)
     return helptexts.TENANT
+
+
+def _get_validate_callback(validate):
+    if validate:
+        return validate_name
+    return None
 
 
 def show_version(ctx, param, value):
@@ -176,11 +180,44 @@ def validate_password(ctx, param, value):
     return value
 
 
+def validate_nonnegative_integer(ctx, param, value):
+    if ctx.resilient_parsing:
+        return
+
+    try:
+        assert int(value) >= 0
+    except (ValueError, AssertionError):
+        raise CloudifyValidationError('ERROR: {0} is expected to be a '
+                                      'nonnegative integer'.format(param.name))
+    return value
+
+
+def set_json(ctx, param, value):
+    if value is not None:
+        set_global_json_output(value)
+    return value
+
+
+def set_format(ctx, param, value):
+    if value == 'json':
+        set_global_json_output(True)
+    return value
+
+
+def json_output_deprecate(ctx, param, value):
+    if value:
+        warnings.warn("Instead of --json-output, use the global "
+                      "`cfy --json` flag")
+    return value
+
+
 def set_verbosity_level(ctx, param, value):
     if not value or ctx.resilient_parsing:
         return
-
-    set_global_verbosity_level(value)
+    if param.name == 'verbose':
+        set_global_verbosity_level(value)
+    elif value and param.name == 'quiet':
+        set_global_verbosity_level(logger.QUIET)
     return value
 
 
@@ -358,6 +395,10 @@ class AliasedGroup(click.Group):
                     '\n    '.join(matches))
             raise click.exceptions.UsageError(error_msg, error.ctx)
 
+    def command(self, *a, **kw):
+        kw.setdefault('cls', CommandWithLoggers)
+        return super(AliasedGroup, self).command(*a, **kw)
+
 
 def group(name):
     """Allow to create a group with a default click context
@@ -370,6 +411,18 @@ def group(name):
         cls=AliasedGroup)
 
 
+class CommandWithLoggers(click.Command):
+    """Like a click Command, but configure loggers first.
+
+    We want loggers to be configured after argument parsing has been
+    performed (ie. verbose/quiet callbacks have fired), but before the
+    command was actually run.
+    """
+    def invoke(self, *a, **kw):
+        logger.configure_loggers()
+        return super(CommandWithLoggers, self).invoke(*a, **kw)
+
+
 def command(*args, **kwargs):
     """Make Click commands Cloudify specific
 
@@ -377,6 +430,7 @@ def command(*args, **kwargs):
     Some decorators are called `@click.something` instead of
     `@cfy.something`
     """
+    kwargs.setdefault('cls', CommandWithLoggers)
     return click.command(*args, **kwargs)
 
 
@@ -408,12 +462,32 @@ class Options(object):
             is_eager=True,
             help=helptexts.VERSION)
 
+        self.format = click.option(
+            '--format',
+            type=click.Choice(['plain', 'json']),
+            expose_value=False,
+            callback=set_format
+        )
+
+        self.json = click.option(
+            '--json',
+            is_flag=True,
+            expose_value=False,
+            default=None,
+            callback=set_json)
+
         self.inputs = click.option(
             '-i',
             '--inputs',
             multiple=True,
             callback=inputs_callback,
             help=helptexts.INPUTS)
+
+        self.reinstall_list = click.option(
+            '-r',
+            '--reinstall-list',
+            multiple=True,
+            help=helptexts.REINSTALL_LIST)
 
         self.parameters = click.option(
             '-p',
@@ -426,6 +500,12 @@ class Options(object):
             '-o',
             '--output-path',
             help=helptexts.OUTPUT_PATH)
+
+        self.all_nodes = click.option(
+            '--all-nodes',
+            is_flag=True,
+            help=helptexts.ALL_NODES
+        )
 
         self.optional_output_path = click.option(
             '-o',
@@ -450,47 +530,36 @@ class Options(object):
             help=helptexts.ALL_TENANTS,
         )
 
+        self.search = click.option(
+            '--search',
+            default=None,
+            required=False,
+            help=helptexts.SEARCH,
+        )
+
         self.include_logs = click.option(
             '--include-logs/--no-logs',
             default=True,
             help=helptexts.INCLUDE_LOGS)
 
+        self.dry_run = click.option(
+            '--dry-run',
+            is_flag=True,
+            help=helptexts.DRY_RUN
+        )
+
         self.json_output = click.option(
             '--json-output',
             is_flag=True,
+            callback=json_output_deprecate,
             help=helptexts.JSON_OUTPUT)
 
         self.tail = click.option(
             '--tail',
             is_flag=True,
+            cls=MutuallyExclusiveOption,
+            mutually_exclusive=['pagination_offset', 'pagination_size'],
             help=helptexts.TAIL_OUTPUT)
-
-        self.validate_only = click.option(
-            '--validate-only',
-            is_flag=True,
-            help=helptexts.VALIDATE_ONLY)
-
-        self.skip_validations = click.option(
-            '--skip-validations',
-            is_flag=True,
-            help=helptexts.SKIP_BOOTSTRAP_VALIDATIONS)
-
-        self.skip_sanity = click.option(
-            '--skip-sanity',
-            is_flag=True,
-            default=False,
-            help=helptexts.SKIP_BOOTSTRAP_SANITY)
-
-        self.keep_up_on_failure = click.option(
-            '--keep-up-on-failure',
-            is_flag=True,
-            help=helptexts.KEEP_UP_ON_FAILURE)
-
-        self.dont_save_password_in_profile = click.option(
-            '--dont-save-password-in-profile',
-            is_flag=True,
-            default=False,
-            help=helptexts.DONT_SAVE_PASSWORD_IN_PROFILE)
 
         self.validate = click.option(
             '--validate',
@@ -507,16 +576,25 @@ class Options(object):
             is_flag=True,
             help=helptexts.SKIP_UNINSTALL)
 
+        self.skip_reinstall = click.option(
+            '--skip-reinstall',
+            is_flag=True,
+            help=helptexts.SKIP_REINSTALL)
+
+        self.ignore_failure = click.option(
+            '--ignore-failure',
+            is_flag=True,
+            help=helptexts.IGNORE_FAILURE)
+
+        self.install_first = click.option(
+            '--install-first',
+            is_flag=True,
+            help=helptexts.INSTALL_FIRST)
+
         self.backup_first = click.option(
             '--backup-first',
             is_flag=True,
             help=helptexts.BACKUP_LOGS_FIRST)
-
-        self.manager_ip = click.option(
-            '-t',
-            '--manager-ip',
-            required=False,
-            help=helptexts.MANAGEMENT_IP)
 
         self.ssh_user = click.option(
             '-s',
@@ -624,19 +702,19 @@ class Options(object):
         self.ssh_port = click.option(
             '--ssh-port',
             required=False,
-            default=constants.REMOTE_EXECUTION_PORT,
-            help=helptexts.SSH_PORT)
-
-        self.ssh_port_no_default = click.option(
-            '--ssh-port',
-            required=False,
             help=helptexts.SSH_PORT)
 
         self.rest_port = click.option(
             '--rest-port',
             required=False,
-            default=constants.DEFAULT_REST_PORT,
             help=helptexts.REST_PORT)
+
+        self.ssl_rest = click.option(
+            '--ssl',
+            is_flag=True,
+            required=False,
+            default=False,
+            help=helptexts.SSL_REST)
 
         self.init_hard_reset = click.option(
             '--hard',
@@ -666,11 +744,6 @@ class Options(object):
             required=False,
             help=helptexts.NODE_NAME)
 
-        self.snapshot_id = click.option(
-            '-s',
-            '--snapshot-id',
-            help=helptexts.SNAPSHOT_ID)
-
         self.without_deployment_envs = click.option(
             '--without-deployment-envs',
             is_flag=True,
@@ -685,6 +758,16 @@ class Options(object):
             '--exclude-credentials',
             is_flag=True,
             help=helptexts.EXCLUDE_CREDENTIALS_IN_SNAPSHOT)
+
+        self.exclude_logs = click.option(
+            '--exclude-logs',
+            is_flag=True,
+            help=helptexts.EXCLUDE_LOGS_IN_SNAPSHOT)
+
+        self.exclude_events = click.option(
+            '--exclude-events',
+            is_flag=True,
+            help=helptexts.EXCLUDE_EVENTS_IN_SNAPSHOT)
 
         self.ssh_command = click.option(
             '-c',
@@ -756,8 +839,7 @@ class Options(object):
             '-r',
             '--security-role',
             required=False,
-            type=click.Choice(['admin', 'user']),
-            default='user',
+            default='default',
             help=helptexts.SECURITY_ROLE)
 
         self.password = click.option(
@@ -806,15 +888,6 @@ class Options(object):
             help=helptexts.USER
         )
 
-        self.permission = click.option(
-            '-p',
-            '--permission',
-            required=False,
-            type=click.Choice(['viewer', 'owner']),
-            default='viewer',
-            help=helptexts.PERMISSION
-        )
-
         self.get_data = click.option(
             '--get-data',
             is_flag=True,
@@ -828,11 +901,39 @@ class Options(object):
             required=False,
             help=helptexts.SECRET_STRING)
 
-        self.secret_file = click.option(
-            '-f',
-            '--secret-file',
+        self.secret_update_if_exists = click.option(
+            '-u',
+            '--update-if-exists',
+            is_flag=True,
+            cls=MutuallyExclusiveOption,
+            mutually_exclusive=['hidden_value', 'visibility'],
+            help=helptexts.SECRET_UPDATE_IF_EXISTS,
+        )
+
+        self.hidden_value = click.option(
+            '--hidden-value',
+            is_flag=True,
+            default=False,
+            help=helptexts.HIDDEN_VALUE,
+        )
+
+        self.update_hidden_value = click.option(
+            '--hidden-value/--not-hidden-value',
+            default=None,
+            help=helptexts.HIDDEN_VALUE)
+
+        self.update_visibility = click.option(
+            '-l',
+            '--visibility',
+            help=helptexts.VISIBILITY.format(VisibilityState.STATES)
+        )
+
+        self.plugins_bundle_path = click.option(
+            '-p',
+            '--path',
             required=False,
-            help=helptexts.SECRET_FILE)
+            help=helptexts.PLUGINS_BUNDLE_PATH
+        )
 
         # same as --inputs, name changed for consistency
         self.cluster_node_options = click.option(
@@ -841,6 +942,70 @@ class Options(object):
             multiple=True,
             callback=inputs_callback,
             help=helptexts.CLUSTER_NODE_OPTIONS)
+
+        self.pagination_offset = click.option(
+            '-o',
+            '--pagination-offset',
+            required=False,
+            default=0,
+            callback=validate_nonnegative_integer,
+            help=helptexts.PAGINATION_OFFSET)
+
+        self.pagination_size = click.option(
+            '-s',
+            '--pagination-size',
+            required=False,
+            default=1000,
+            callback=validate_nonnegative_integer,
+            help=helptexts.PAGINATION_SIZE)
+
+        self.manager_ip = click.option(
+            '--manager-ip',
+            required=False,
+            help=helptexts.MANAGER_IP
+        )
+
+        self.manager_certificate = click.option(
+            '--manager_certificate',
+            required=False,
+            help=helptexts.MANAGER_CERTIFICATE_PATH
+        )
+
+        self.stop_old_agent = click.option(
+            '--stop-old-agent',
+            is_flag=True,
+            default=False,
+            help=helptexts.STOP_OLD_AGENT
+        )
+
+        self.ignore_plugin_failure = click.option(
+            '-i',
+            '--ignore-plugin-failure',
+            is_flag=True,
+            default=False,
+            help=helptexts.IGNORE_PLUGIN_FAILURE
+        )
+
+    def common_options(self, f):
+        """A shorthand for applying commonly used arguments.
+
+        To be used for arguments that are going to be applied for all or
+        almost all commands.
+        """
+        for arg in [self.json, self.verbose(), self.format, self.quiet()]:
+            f = arg(f)
+        return f
+
+    @staticmethod
+    def secret_file():
+        return click.option(
+            '-f',
+            '--secret-file',
+            required=False,
+            cls=MutuallyExclusiveOption,
+            mutually_exclusive=['secret_string'],
+            help=helptexts.SECRET_FILE
+        )
 
     @staticmethod
     def include_keys(help):
@@ -859,6 +1024,17 @@ class Options(object):
             expose_value=expose_value,
             is_eager=True,
             help=helptexts.VERBOSE)
+
+    @staticmethod
+    def quiet(expose_value=False):
+        return click.option(
+            '-q',
+            '--quiet',
+            is_flag=True,
+            callback=set_verbosity_level,
+            expose_value=expose_value,
+            is_eager=True,
+            help=helptexts.QUIET)
 
     @staticmethod
     def tenant_name(required=True,
@@ -952,15 +1128,23 @@ class Options(object):
             help=help)
 
     @staticmethod
-    def blueprint_filename():
+    def kill():
+        return click.option(
+            '-k',
+            '--kill',
+            is_flag=True,
+            help=helptexts.KILL_EXECUTION)
+
+    @staticmethod
+    def blueprint_filename(extra_message=''):
         return click.option(
             '-n',
             '--blueprint-filename',
             default=DEFAULT_BLUEPRINT_PATH,
-            help=helptexts.BLUEPRINT_FILENAME)
+            help=helptexts.BLUEPRINT_FILENAME + extra_message)
 
     @staticmethod
-    def workflow_id(default):
+    def workflow_id(default=None):
         return click.option(
             '-w',
             '--workflow-id',
@@ -1008,15 +1192,27 @@ class Options(object):
             help=helptexts.OPERATION_TIMEOUT.format(default))
 
     @staticmethod
-    def deployment_id(required=False):
+    def deployment_id(required=False, validate=False):
         return click.option(
             '-d',
             '--deployment-id',
             required=required,
-            help=helptexts.DEPLOYMENT_ID)
+            help=helptexts.DEPLOYMENT_ID,
+            callback=_get_validate_callback(validate))
 
     @staticmethod
-    def blueprint_id(required=False, multiple_blueprints=False):
+    def snapshot_id(required=False, validate=False):
+        return click.option(
+            '-s',
+            '--snapshot-id',
+            required=required,
+            help=helptexts.SNAPSHOT_ID,
+            callback=_get_validate_callback(validate))
+
+    @staticmethod
+    def blueprint_id(required=False,
+                     multiple_blueprints=False,
+                     validate=False):
         def pass_empty_blueprint_id(func):
             @wraps(func)
             def wrapper(*args, **kwargs):
@@ -1032,7 +1228,8 @@ class Options(object):
                 '-b',
                 '--blueprint-id',
                 required=required,
-                help=helptexts.BLUEPRINT_ID)
+                help=helptexts.BLUEPRINT_ID,
+                callback=_get_validate_callback(validate))
 
     @staticmethod
     def blueprint_path(required=False):
@@ -1040,7 +1237,54 @@ class Options(object):
             '-p',
             '--blueprint-path',
             required=required,
-            type=click.Path(exists=True))
+            type=click.Path(exists=True),
+            help=helptexts.BLUEPRINT_PATH)
+
+    @staticmethod
+    def tenant_role(help_text, required, options_flags=None):
+        args = options_flags or ['-r', '--role']
+
+        kwargs = {
+            'required': required,
+            'help': help_text
+        }
+        return click.option(*args, **kwargs)
+
+    @staticmethod
+    def user_tenant_role(required=True, options_flags=None):
+        return Options.tenant_role(
+            helptexts.USER_TENANT_ROLE, required=required,
+            options_flags=options_flags)
+
+    @staticmethod
+    def group_tenant_role():
+        return Options.tenant_role(
+            helptexts.GROUP_TENANT_ROLE, required=True)
+
+    @staticmethod
+    def visibility(required=False,
+                   valid_values=VisibilityState.STATES,
+                   mutually_exclusive_required=True):
+        args = ['-l', '--visibility']
+        kwargs = {
+            'required': required,
+            'help': helptexts.VISIBILITY.format(valid_values)
+        }
+        if not required:
+            kwargs['default'] = VisibilityState.TENANT
+            kwargs['help'] += ' [default: tenant]'
+            if mutually_exclusive_required:
+                kwargs['cls'] = MutuallyExclusiveOption
+                kwargs['mutually_exclusive'] = ['private_resource']
+        return click.option(*args, **kwargs)
+
+    @staticmethod
+    def plugin_yaml_path():
+        return click.option(
+            '-y',
+            '--yaml-path',
+            required=True,
+            help=helptexts.PLUGIN_YAML_PATH)
 
 
 options = Options()

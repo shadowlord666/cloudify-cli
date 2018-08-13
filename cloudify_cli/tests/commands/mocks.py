@@ -60,8 +60,10 @@ def execution_mock(status, wf_id='mock_wf'):
         'error': '',
         'id': uuid4(),
         'created_at': datetime.now().isoformat()[:-3],
-        'parameters': {},
-        'permission': 'creator',
+        'parameters': {
+            'param1': 'value1'
+        },
+        'visibility': 'private',
         'created_by': 'admin',
         'tenant_name': DEFAULT_TENANT_NAME
     })
@@ -150,7 +152,7 @@ def node_instance_get_mock():
         'runtime_properties': {
             'floating_ip': '127.0.0.1'
         },
-        'permission': 'creator',
+        'visibility': 'private',
         'created_by': 'admin',
         'tenant_name': DEFAULT_TENANT_NAME
     })
@@ -168,7 +170,7 @@ def node_get_mock():
         'properties': {
             'port': '8080'
         },
-        'permission': 'creator',
+        'visibility': 'private',
         'created_by': 'admin',
         'tenant_name': DEFAULT_TENANT_NAME
     })
@@ -186,22 +188,20 @@ def mock_stdout():
         yield stdout
 
 
-@contextmanager
-def mock_logger(attribute_path):
-    output = StringIO()
+class MockPagination(dict):
+    def __init__(self, total=0):
+        self.total = total
 
-    class MockLogger(object):
-        @staticmethod
-        def info(message):
-            output.write(message)
-    with patch(attribute_path, MockLogger):
-        yield output
+
+class MockMetadata(dict):
+    def __init__(self, pagination=MockPagination()):
+        self.pagination = pagination
 
 
 class MockListResponse(object):
-    def __init__(self, items, _):
+    def __init__(self, items=[], _=None):
         self.items = items
-        self.metadata = None
+        self.metadata = MockMetadata()
 
     def __iter__(self):
         return iter(self.items)

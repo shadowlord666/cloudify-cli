@@ -30,16 +30,12 @@ from cStringIO import StringIO
 from mock import MagicMock, patch
 from itertools import chain, repeat, count
 
-import cloudify
 from cloudify import logs
-from cloudify.workflows import local
 
-from cloudify_rest_client.nodes import Node
 from cloudify_rest_client.executions import Execution
 from cloudify_rest_client.exceptions import NotClusterMaster
 from cloudify_rest_client.client import CloudifyClient
 from cloudify_rest_client.client import DEFAULT_API_VERSION
-from cloudify_rest_client.node_instances import NodeInstance
 
 import dsl_parser
 from dsl_parser.constants import IMPORT_RESOLVER_KEY, \
@@ -54,7 +50,6 @@ from .. import logger
 from .. import constants
 from ..config import config
 from .. import local as cli_local
-from ..bootstrap import bootstrap
 from ..exceptions import CloudifyCliError
 from ..colorful_event import ColorfulEvent
 from ..exceptions import ExecutionTimeoutError
@@ -65,7 +60,7 @@ from ..execution_events_fetcher import ExecutionEventsFetcher
 from . import cfy
 
 from .commands.test_base import CliCommandTest
-from .commands.mocks import mock_logger, mock_stdout, MockListResponse
+from .commands.mocks import mock_stdout, MockListResponse
 from .commands.constants import BLUEPRINTS_DIR, SAMPLE_BLUEPRINT_PATH
 
 
@@ -90,8 +85,8 @@ class TestCLIBase(CliCommandTest):
                 expected_logging_level = logging.DEBUG
             else:
                 expected_logging_level = logging.INFO
-            self.assertTrue(logger.all_loggers())
-            for logger_name in logger.all_loggers():
+            for logger_name in ['cloudify.cli.main',
+                                'cloudify.rest_client.http']:
                 log = logging.getLogger(logger_name)
                 self.assertEqual(log.level, expected_logging_level)
 
@@ -526,11 +521,11 @@ class TestLogger(CliCommandTest):
         def mock_create_message(event):
             return None if event['key'] == 'hide' else event['key']
 
-        with mock_logger('cloudify_cli.logger._lgr') as output:
+        with mock_stdout() as output:
             with patch('cloudify.logs.create_event_message_prefix',
                        mock_create_message):
                 events_logger(events)
-        self.assertEqual(events[0]['key'], output.getvalue())
+        self.assertEqual(events[0]['key'], output.getvalue().strip())
 
     def test_json_events_logger(self):
         events_logger = logger.get_events_logger(json_output=True)
@@ -648,12 +643,12 @@ class ExecutionEventsFetcherTest(CliCommandTest):
                                                     'execution_id',
                                                     batch_size=batch_size)
             for i in range(0, 4):
-                events_batch_count = \
-                    events_fetcher._fetch_and_process_events_batch()
+                events_batch_count, _ = \
+                    events_fetcher.fetch_and_process_events_batch()
                 self.assertEqual(events_batch_count, batch_size)
                 total_events_count += events_batch_count
-            remaining_events_count = \
-                events_fetcher._fetch_and_process_events_batch()
+            remaining_events_count, _ = \
+                events_fetcher.fetch_and_process_events_batch()
             self.assertEqual(remaining_events_count, 1)
             total_events_count += remaining_events_count
             self.assertEqual(len(self.events), total_events_count)
@@ -662,7 +657,7 @@ class ExecutionEventsFetcherTest(CliCommandTest):
         self.events = self._generate_events(10)
         events_fetcher = ExecutionEventsFetcher(self.client, 'execution_id',
                                                 batch_size=100)
-        batch_events = events_fetcher._fetch_events_batch()
+        batch_events = events_fetcher._fetch_events_batch().items
         self.assertListEqual(self.events, batch_events)
 
     def test_fetch_events_explicit_several_batches(self):
@@ -729,7 +724,7 @@ class WaitForExecutionTests(CliCommandTest):
         self.time.time.side_effect = count(0)
 
     def test_wait_for_log_after_execution_finishes(self):
-        """wait_for_execution continues polling logs, after execution status
+        """wait_for_execution polls logs once, after execution status
         is terminated
         """
 
@@ -740,21 +735,23 @@ class WaitForExecutionTests(CliCommandTest):
             repeat(MagicMock(status=Execution.TERMINATED))
         )
 
-        # prepare mock events.list() calls - first return empty events 100
-        # times and only then return a 'workflow_succeeded' event
+        # prepare mock events.list() calls - first return empty,
+        # and only then return a 'workflow_succeeded' event
         events = chain(
-            repeat(MockListResponse([], 0), 100),
-            [MockListResponse([{
-                'deployment_id': '<deployment_id>',
-                'execution_id': '<execution_id>',
-                'node_name': '<node_name>',
-                'operation': '<operation>',
-                'workflow_id': '<workflow_id>',
-                'node_instance_id': '<node_instance_id>',
-                'message': '<message>',
-                'error_causes': '<error_causes>',
-                'event_type': 'workflow_succeeded',
-            }], 1)],
+            [
+                MockListResponse([], 0),
+                MockListResponse([{
+                    'deployment_id': '<deployment_id>',
+                    'execution_id': '<execution_id>',
+                    'node_name': '<node_name>',
+                    'operation': '<operation>',
+                    'workflow_id': '<workflow_id>',
+                    'node_instance_id': '<node_instance_id>',
+                    'message': '<message>',
+                    'error_causes': '<error_causes>',
+                    'event_type': 'workflow_succeeded',
+                }], 1)
+            ],
             repeat(MockListResponse([], 0))
         )
 
@@ -765,9 +762,9 @@ class WaitForExecutionTests(CliCommandTest):
         wait_for_execution(self.client, mock_execution, timeout=None)
 
         calls_count = len(self.client.events.list.mock_calls)
-        self.assertEqual(calls_count, 101, """wait_for_execution didnt keep
-            polling events after execution terminated (expected 101
-            calls, got %d)""" % calls_count)
+        self.assertEqual(calls_count, 2, """wait_for_execution didnt poll
+            events once after execution terminated (expected 2
+            call, got %d)""" % calls_count)
 
     def test_wait_for_execution_after_log_succeeded(self):
         """wait_for_execution continues polling the execution status,
@@ -1009,62 +1006,6 @@ class ImportResolverLocalUseTests(CliCommandTest):
         self._test_using_import_resolver(
             'blueprints validate', blueprint_path, blueprints)
 
-    @mock.patch.object(local._Environment, 'execute')
-    @mock.patch.object(dsl_parser.tasks, 'prepare_deployment_plan')
-    def test_bootstrap_uses_import_resolver_for_parsing(self, *_):
-        blueprint_path = '{0}/local/{1}.yaml'.format(
-            BLUEPRINTS_DIR, 'blueprint')
-
-        old_validate_dep_size = bootstrap.validate_manager_deployment_size
-        old_load_env = bootstrap.load_env
-        old_init = cloudify.workflows.local.FileStorage.init
-        old_get_nodes = cloudify.workflows.local.FileStorage.get_nodes
-        old_get_node_instances = \
-            cloudify.workflows.local.FileStorage.get_node_instances
-
-        bootstrap.validate_manager_deployment_size =\
-            lambda blueprint_path: None
-
-        def mock_load_env(name):
-            raise IOError('mock load env')
-        bootstrap.load_env = mock_load_env
-
-        def mock_init(self, name, plan, nodes, node_instances, blueprint_path,
-                      provider_context):
-            return 'mock init'
-        bootstrap.local.FileStorage.init = mock_init
-
-        def mock_get_nodes(self):
-            return [
-                Node({'id': 'mock_node',
-                      'type_hierarchy': 'cloudify.nodes.CloudifyManager'})
-            ]
-        cloudify.workflows.local.FileStorage.get_nodes = mock_get_nodes
-
-        def mock_get_node_instances(self):
-            return [
-                NodeInstance({'node_id': 'mock_node',
-                              'runtime_properties': {
-                                  'provider': 'mock_provider',
-                                  'manager_ip': 'mock_manager_ip',
-                                  'ssh_user': 'mock_ssh_user',
-                                  'ssh_key_path': 'mock_ssh_key_path',
-                                  'rest_port': 'mock_rest_port'}})
-            ]
-        cloudify.workflows.local.FileStorage.get_node_instances = \
-            mock_get_node_instances
-
-        try:
-            self._test_using_import_resolver(
-                'bootstrap', blueprint_path, dsl_parser.parser)
-        finally:
-            bootstrap.validate_manager_deployment_size = old_validate_dep_size
-            bootstrap.load_env = old_load_env
-            bootstrap.local.FileStorage.init = old_init
-            cloudify.workflows.local.FileStorage.get_nodes = old_get_nodes
-            cloudify.workflows.local.FileStorage.get_node_instances = \
-                old_get_node_instances
-
     @mock.patch('cloudify_cli.local.get_storage', new=mock.MagicMock)
     @mock.patch('cloudify.workflows.local._prepare_nodes_and_instances')
     @mock.patch('dsl_parser.tasks.prepare_deployment_plan')
@@ -1099,7 +1040,6 @@ class TestGetRestClient(CliCommandTest):
         del os.environ[constants.CLOUDIFY_PASSWORD_ENV]
         del os.environ[constants.CLOUDIFY_SSL_TRUST_ALL]
         del os.environ[constants.LOCAL_REST_CERT_FILE]
-
         cfy.purge_dot_cloudify()
 
     def test_get_rest_client(self):

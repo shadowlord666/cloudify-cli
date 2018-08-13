@@ -30,20 +30,20 @@ from .. import exceptions
 from ..config import config
 from ..logger import DEFAULT_LOG_FILE
 from ..logger import configure_loggers
-from ..bootstrap import bootstrap as bs
 from ..exceptions import CloudifyCliError
 
 
 @cfy.command(name='init', short_help='Initialize a working env')
 @cfy.argument('blueprint-path', required=False)
 @cfy.options.blueprint_filename()
-@cfy.options.blueprint_id(required=False, multiple_blueprints=True)
+@cfy.options.blueprint_id(
+    required=False, multiple_blueprints=True, validate=True)
 @cfy.options.reset_context
 @cfy.options.inputs
 @cfy.options.install_plugins
 @cfy.options.init_hard_reset
 @cfy.options.enable_colors
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.pass_logger
 def init(blueprint_path,
          blueprint_filename,
@@ -59,8 +59,8 @@ def init(blueprint_path,
     This is required to perform many actions and should be the first
     action performed after installing Cloudify.
 
-    Note: Running `cfy bootstrap`, `cfy install` or `cfy profiles use` will
-    initialize a environment automatically.
+    Note: Running `cfy install` or `cfy profiles use` will
+    initialize an environment automatically.
 
     Providing a `BLUEPRINT_PATH` will also initialize a blueprint to
     work on.
@@ -161,7 +161,6 @@ def init_manager_profile(profile_name,
                 os.remove(config.CLOUDIFY_CONFIG_PATH)
             else:
                 os.remove(context_file_path)
-            bs.delete_workdir()
         else:
             _raise_initialized_error(profile_name)
 

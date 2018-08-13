@@ -16,6 +16,7 @@
 
 VERBOSE = \
     "Show verbose output. You can supply this up to three times (i.e. -vvv)"
+QUIET = "Show only critical logs"
 VERSION = (
     "Display the version and exit (if a manager is used, its version will "
     "also show)"
@@ -24,11 +25,11 @@ VERSION = (
 INPUTS_PARAMS_USAGE = (
     '(Can be provided as wildcard based paths '
     '(*.yaml, /my_inputs/, etc..) to YAML files, a JSON string or as '
-    'key1=value1;key2=value2). This argument can be used multiple times'
+    '\'key1=value1;key2=value2\'). This argument can be used multiple times'
 )
 WORKFLOW_TO_EXECUTE = "The workflow to execute [default: {0}]"
 
-BLUEPRINT_PATH = "The path to the application's blueprint file"
+BLUEPRINT_PATH = "The path to the application's blueprint file [DEPRECATED]"
 BLUEPRINT_ID = "The unique identifier for the blueprint"
 VALIDATE_BLUEPRINT = "Validate the blueprint first"
 
@@ -40,11 +41,16 @@ ENABLE_COLORS = "Enable colors in logger (use --hard when working with" \
                 " an initialized environment) [default: False]"
 
 OUTPUT_PATH = "The local path to download to"
+ALL_NODES = "Perform operation on all cluster nodes"
 BLUEPRINT_FILENAME = (
     "The name of the archive's main blueprint file. "
     "This is only relevant if uploading an archive")
 INPUTS = "Inputs for the deployment {0}".format(INPUTS_PARAMS_USAGE)
 PARAMETERS = "Parameters for the workflow {0}".format(INPUTS_PARAMS_USAGE)
+REINSTALL_LIST = (
+    "Node instances ids to be reinstalled as part of deployment update. They "
+    "will be reinstalled even if the flag --skip-reinstall has been supplied"
+)
 ALLOW_CUSTOM_PARAMETERS = (
     "Allow passing custom parameters (which were not defined in the "
     "workflow's schema in the blueprint) to the execution"
@@ -69,6 +75,19 @@ JSON_OUTPUT = "Output events in a consumable JSON format"
 
 SKIP_INSTALL = "Skip install lifecycle operations"
 SKIP_UNINSTALL = "Skip uninstall lifecycle operations"
+SKIP_REINSTALL = (
+    "Skip automatically reinstall node-instances that their properties has "
+    "been modified, as part of a deployment update. Node instances that were "
+    "explicitly given to the reinstall list will still be reinstalled"
+)
+IGNORE_FAILURE = (
+    "Supply the parameter `ignore_failure` with the value `true` to the "
+    "uninstall workflow"
+)
+INSTALL_FIRST = (
+    "In deployment update, perform install workflow and then uninstall "
+    "workflow. default: uninstall and then install"
+)
 FORCE_UPDATE = (
     "Force running update in case a previous update on this deployment has "
     "failed to finished successfully"
@@ -89,6 +108,11 @@ FORCE_CANCEL_EXECUTION = (
     "Terminate the execution abruptly, rather than request an orderly "
     "termination"
 )
+KILL_EXECUTION = (
+    "Terminate the execution abruptly, and also stop currently running tasks. "
+    "This will stop all processes running operations and workflows for the "
+    "given execution."
+)
 
 INIT_LOCAL = "Initialize environment for local executions"
 NODE_NAME = "The node's name"
@@ -104,23 +128,11 @@ FORCE_RESTORE_ON_DIRTY_MANAGER = (
     "deployments"
 )
 INCLUDE_METRICS_IN_SNAPSHOT = "Include metrics data in the snapshot"
-EXCLUDE_CREDENTIALS_IN_SNAPSHOT = "Exclude credentials in the snapshot"
+EXCLUDE_CREDENTIALS_IN_SNAPSHOT = "Exclude credentials from the snapshot"
+EXCLUDE_LOGS_IN_SNAPSHOT = "Exclude logs from the snapshot"
+EXCLUDE_EVENTS_IN_SNAPSHOT = "Exclude events from the snapshot"
 SNAPSHOT_ID = "The unique identifier for the snapshot"
 
-KEEP_UP_ON_FAILURE = "Do not teardown the manager even if the bootstrap fails"
-DONT_SAVE_PASSWORD_IN_PROFILE = "After the bootstrap is complete, don't " \
-                                "save the password in the profile context. " \
-                                "Regardless, the password will *always* be " \
-                                "printed to the console [default: False]"
-VALIDATE_ONLY = (
-    "Only perform resource creation validation without actually bootstrapping"
-)
-SKIP_BOOTSTRAP_VALIDATIONS = (
-    "Bootstrap without validating resource creation prior to bootstrapping "
-    "the manager"
-)
-SKIP_BOOTSTRAP_SANITY = \
-    "Bootstrap without performing the post-bootstrap sanity test"
 DEV_TASK_ARGS = "Arguments for the fabric task"
 
 MAINTENANCE_MODE_WAIT = (
@@ -140,17 +152,14 @@ IGNORE_DEPLOYMENTS = \
 
 TAIL_OUTPUT = "Tail the events of the specified execution until it ends"
 
-
 SET_MANAGEMENT_CREDS = (
     'You can use the `-s` and `-k` flags to set the ssh user and '
     'key-file path respectively. '
     '(e.g. `cfy profiles use -s my_user -k ~/my/key/path`)'
 )
 
-DEFAULT_MUTUALITY_MESSAGE = 'Cannot be used simultaneously'
-
-MANAGEMENT_IP = 'The IP of the host machine on which you bootstrapped'
-SSH_USER = 'The SSH user on the host machine with which you bootstrapped'
+MANAGEMENT_IP = 'The IP of the manager host machine'
+SSH_USER = 'The SSH user on the manager host machine'
 SSH_KEY = 'The path to the ssh key-file to use when connecting'
 SSH_PORT = 'The SSH port to use when connecting to the manager'
 MANAGER_USERNAME = 'Manager username used to run commands on the manager'
@@ -159,26 +168,32 @@ MANAGER_TENANT = 'The tenant associated with the current user operating the ' \
                  'manager'
 SSL_STATE = 'Required SSL state (on/off)'
 REST_PORT = "The REST server's port"
-REST_CERT = "The REST server's external certificate file location"
+SSL_REST = "Connect to REST server using SSL"
+REST_CERT = "The REST server's external certificate file location (implies " \
+    "--ssl)"
 
 EXPORT_SSH_KEYS = 'Include ssh key files in archive'
 IMPORT_SSH_KEYS = 'WARNING: Import exported keys to their original locations'
 
 SORT_BY = "Key for sorting the list"
 DESCENDING = "Sort list in descending order [default: False]"
+SEARCH = 'Search resources by name/id. The returned list will include only ' \
+         'resources that contain the given search pattern'
 
 TENANT = 'The name of the tenant'
 TENANT_TEMPLATE = 'The name of the tenant of the {0}'
 TENANT_LIST_TEMPLATE = 'The name of the tenant to list {0}s from'
 ALL_TENANTS = 'Include resources from all tenants associated with the user. ' \
-              'This option is mutually exclusive with the argument ' \
-              '`tenant_name` and cannot be used simultaneously'
+              'You cannot use this argument with arguments: [tenant_name]'
 GROUP = 'The name of the user group'
 GROUP_DN = 'The ldap group\'s distinguished name. This option is required ' \
            'when using ldap'
+GROUP_TENANT_ROLE = (
+    'Role assigned to the users of group in the context of the tenant.'
+)
 
-SECURITY_ROLE = "A role to determine the user's permissions on the manager " \
-                "(default: user)"
+SECURITY_ROLE = "A role to determine the user's permissions on the manager, " \
+                "if admin or default (default: default role)"
 PASSWORD = 'Cloudify manager password'
 
 CLUSTER_HOST_IP = \
@@ -191,11 +206,6 @@ CLUSTER_JOIN_PROFILE = (
     '(use when you have a profile containing the cluster master)'
 )
 
-PRIVATE_RESOURCE = 'If set to True the uploaded resource will only be ' \
-                   'accessible by its creator. Otherwise, the resource is ' \
-                   'accessible by all users that belong to the same tenant. ' \
-                   '(default: False)'
-
 SKIP_PLUGINS_VALIDATION = 'Determines whether to validate if the' \
                           ' required deployment plugins exist on the manager.'\
                           ' If validation is skipped, plugins containing' \
@@ -203,8 +213,7 @@ SKIP_PLUGINS_VALIDATION = 'Determines whether to validate if the' \
 
 USER = 'Username of user to whom the permissions apply. ' \
        'This argument can be used multiple times'
-PERMISSION = 'The permission applicable to a resource [viewer|owner] ' \
-             '(default:viewer)'
+USER_TENANT_ROLE = 'Role assigned to user in the context of the tenant.'
 RESTORE_CERTIFICATES = 'Restore the certificates from the snapshot, using ' \
                        'them to replace the current Manager certificates. ' \
                        'If the certificates` metadata (I.E: the Manager IP ' \
@@ -219,7 +228,7 @@ NO_REBOOT = 'Do not perform an automatic reboot to the Manager VM after ' \
             'restoring certificates a from snapshot (not recommended). ' \
             'Only relevant if the `--restore-certificates` flag was supplied'
 SKIP_CREDENTIALS_VALIDATION = 'Do not check that the passed credentials are ' \
-                              'correct (default:False)'
+                              'correct (default: False)'
 LDAP_SERVER = 'The LDAP server address to authenticate against'
 LDAP_USERNAME = 'The LDAP admin username to be set on the Cloudify manager'
 LDAP_PASSWORD = 'The LDAP admin password to be set on the Cloudify manager'
@@ -235,6 +244,44 @@ GET_DATA = 'When set to True, displays the full list of connected resources ' \
 PROFILE_NAME = 'Name of the profile to use'
 SECRET_VALUE = "The secret's value to be set"
 SECRET_STRING = "The string to use as the secret's value"
-SECRET_FILE = "The secret's file to use its content as value to be set"
+SECRET_FILE = "The file with the contents of the secret"
+SECRET_UPDATE_IF_EXISTS = 'Update secret value if secret key already ' \
+                          'exists. [This option is deprecated; use cfy ' \
+                          'secrets update command instead]'
+HIDDEN_VALUE = 'The secret value is only shown to the user that created the ' \
+               'secret and to admins. Use of the secret is allowed ' \
+               'according to user roles and the visibility of the secret'
+PLUGINS_BUNDLE_PATH = 'The path of the plugins bundle'
 CLUSTER_NODE_OPTIONS = 'Additional options for the cluster node '\
                        'configuration {0}'.format(INPUTS_PARAMS_USAGE)
+PRIVATE_RESOURCE = 'This option is deprecated; use --visibility option ' \
+                   'instead. If set to True the uploaded resource will only ' \
+                   'be accessible by its creator. Otherwise, the resource ' \
+                   'is accessible by all users that belong to the same ' \
+                   'tenant [default: False].'
+VISIBILITY = 'Defines who can see the resource, can be set to one of {0}'
+PLUGIN_YAML_PATH = "The path to the plugin's yaml file"
+PAGINATION_SIZE = 'The max number of results to retrieve per page ' \
+                  '[default: 1000]'
+PAGINATION_OFFSET = 'The number of resources to skip; --pagination-offset=1 ' \
+                    'skips the first resource [default: 0]'
+DRY_RUN = 'If set, no actual operations will be performed. This ' \
+          'only prints the executed tasks, without side effects'
+
+MANAGER_IP = "The private IP of the current leader (master) Manager. This " \
+             "IP is used to connect to the Manager's RabbitMQ. " \
+             "(relevant only in HA cluster)"
+MANAGER_CERTIFICATE_PATH = 'A path to a file containing the SSL certificate ' \
+                           'of the current leader Manager. The certificate ' \
+                           'is available on the Manager: ' \
+                           '/etc/cloudify/ssl/cloudify_internal_ca_cert.pem'
+MANAGER_REST_TOKEN = 'The REST token of the new Cloudify Manager.' \
+                     ' Acquire the token by running `cfy tokens get` while' \
+                     ' using the new Manager.'
+STOP_OLD_AGENT = 'If set, after installing the new agent the old agent ' \
+                 '(that is connected to the old Cloudify Manager) will be ' \
+                 'stopped. *IMPORTANT* if the deployment has monitoring ' \
+                 'with auto-healing configured, you need to disable it first'
+IGNORE_PLUGIN_FAILURE = 'if set, plugin installation errors during snapshot ' \
+                        'restore will only be logged as warnings, and will ' \
+                        'not fail the snapshot restore workflow'

@@ -16,15 +16,48 @@
 
 from .. import env
 from ..cli import cfy
-from ..table import print_data
+from ..table import print_data, print_single
 from ..utils import handle_client_error
 
-USER_COLUMNS = ['username', 'groups', 'role', 'tenants', 'active',
-                'last_login_at']
+USER_COLUMNS = ['username', 'groups', 'role', 'group_system_roles', 'active',
+                'last_login_at', 'is_locked']
+GET_DATA_COLUMNS = ['user_tenants', 'group_tenants']
+NO_GET_DATA_COLUMNS = ['tenants']
+USER_LABELS = {'role': 'system wide role',
+               'group_system_roles': 'system wide roles via groups'}
+
+
+def _format_user(user):
+    user_tenants = dict(
+        (str(tenant), str(user.user_tenants[tenant]))
+        for tenant in user.user_tenants
+    )
+    group_tenants = dict(
+        (str(tenant),
+         dict(
+             (str(role),
+              [str(group) for group in user.group_tenants[tenant][role]])
+             for role in user.group_tenants[tenant]
+        ))
+        for tenant in user.group_tenants
+    )
+    user['user_tenants'] = str(user_tenants)[1:-1]
+    user['group_tenants'] = str(group_tenants)[1:-1]
+    return user
+
+
+def _format_group_system_roles(user):
+    group_system_roles = dict(
+        (str(role),
+         [str(user_group) for user_group in user['group_system_roles'][role]])
+        for role in user['group_system_roles']
+    )
+    user['group_system_roles'] = str(group_system_roles).strip('{}')
+    return user
 
 
 @cfy.group(name='users')
-@cfy.options.verbose()
+@cfy.options.common_options
 def users():
     """Handle Cloudify users
     """
@@ -35,45 +68,84 @@ def users():
 @users.command(name='list', short_help='List users [manager only]')
 @cfy.options.sort_by('username')
 @cfy.options.descending
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.get_data
+@cfy.options.search
+@cfy.options.pagination_offset
+@cfy.options.pagination_size
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
-def list(sort_by, descending, get_data, logger, client):
+def list(sort_by,
+         descending,
+         get_data,
+         search,
+         pagination_offset,
+         pagination_size,
+         logger,
+         client):
     """List all users
     """
     logger.info('Listing all users...')
     users_list = client.users.list(
         sort=sort_by,
         is_descending=descending,
-        _get_data=get_data
+        _get_data=get_data,
+        _search=search,
+        _offset=pagination_offset,
+        _size=pagination_size
     )
-    print_data(USER_COLUMNS, users_list, 'Users:')
+    total = users_list.metadata.pagination.total
+    # copy list
+    columns = [] + USER_COLUMNS
+    users_list = [_format_group_system_roles(user) for user in users_list]
+    if get_data:
+        users_list = [_format_user(user) for user in users_list]
+        columns += GET_DATA_COLUMNS
+    else:
+        columns += NO_GET_DATA_COLUMNS
+    print_data(columns, users_list, 'Users:', labels=USER_LABELS)
+    logger.info('Showing {0} of {1} users'.format(len(users_list), total))
 
 
 @users.command(name='create', short_help='Create a user [manager only]')
 @cfy.argument('username', callback=cfy.validate_name)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.security_role
 @cfy.options.password
+@cfy.options.tenant_name(required=False)
+@cfy.options.user_tenant_role(required=False,
+                              options_flags=['-l', '--user-tenant-role'])
 @cfy.assert_manager_active()
-@cfy.pass_client()
+@cfy.pass_client(use_tenant_in_header=False)
 @cfy.pass_logger
-def create(username, security_role, password, logger, client):
+def create(username,
+           security_role,
+           password,
+           tenant_name,
+           user_tenant_role,
+           logger,
+           client):
     """Create a new user on the manager
 
     `USERNAME` is the username of the user
     """
     client.users.create(username, password, security_role)
-    logger.info('User `{0}` created'.format(username))
+    logger.info('User `{0}` created with `{1}` security role'.format(
+        username, security_role))
+
+    if tenant_name and user_tenant_role:
+        client.tenants.add_user(username, tenant_name, user_tenant_role)
+        logger.info(
+            'User `{0}` added successfully to tenant `{1}` with `{2}` role'
+            .format(username, tenant_name, user_tenant_role))
 
 
 @users.command(name='set-password',
                short_help='Set a new password for a user [manager only]')
 @cfy.argument('username', callback=cfy.validate_name)
 @cfy.options.password
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -91,7 +163,7 @@ def set_password(username, password, logger, client):
                short_help='Set a new role for a user [manager only]')
 @cfy.argument('username', callback=cfy.validate_name)
 @cfy.options.security_role
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -109,7 +181,7 @@ def set_role(username, security_role, logger, client):
                short_help='Get details for a single user [manager only]')
 @cfy.argument(
     'username', callback=cfy.validate_name, default=env.get_username())
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.options.get_data
 @cfy.assert_manager_active()
 @cfy.pass_client()
@@ -124,13 +196,23 @@ def get(username, get_data, logger, client):
         user_details = client.users.get_self(_get_data=get_data)
     else:
         user_details = client.users.get(username, _get_data=get_data)
-    print_data(USER_COLUMNS, user_details, 'Requested user info:')
+        # copy list
+    columns = [] + USER_COLUMNS
+    if get_data:
+        _format_user(user_details)
+        columns += GET_DATA_COLUMNS
+    else:
+        columns += NO_GET_DATA_COLUMNS
+    print_single(columns,
+                 user_details,
+                 'Requested user info:',
+                 labels=USER_LABELS)
 
 
 @users.command(name='delete',
                short_help='Delete a user [manager only]')
 @cfy.argument('username', callback=cfy.validate_name)
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -147,7 +229,7 @@ def delete(username, logger, client):
 @users.command(name='activate',
                short_help='Make an inactive user active [manager only]')
 @cfy.argument('username')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -166,7 +248,7 @@ def activate(username, logger, client):
 @users.command(name='deactivate',
                short_help='Make an active user inactive [manager only]')
 @cfy.argument('username')
-@cfy.options.verbose()
+@cfy.options.common_options
 @cfy.assert_manager_active()
 @cfy.pass_client()
 @cfy.pass_logger
@@ -180,3 +262,22 @@ def deactivate(username, logger, client):
     with handle_client_error(409, graceful_msg, logger):
         client.users.deactivate(username)
         logger.info('User deactivated')
+
+
+@users.command(name='unlock',
+               short_help='Unlock a locked user [manager only]')
+@cfy.argument('username')
+@cfy.options.common_options
+@cfy.assert_manager_active()
+@cfy.pass_client()
+@cfy.pass_logger
+def unlock(username, logger, client):
+    """Unlock a locked user
+
+    `USERNAME` is the username of the user
+    """
+    graceful_msg = 'User `{0}` is already unlocked'.format(username)
+    logger.info('Unlocking user `{0}`...'.format(username))
+    with handle_client_error(409, graceful_msg, logger):
+        client.users.unlock(username)
+        logger.info('User unlocked')

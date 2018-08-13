@@ -33,6 +33,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+.pytest_cache/
 
 # Translations
 *.mo
@@ -65,4 +66,5 @@ docs/_build/
 .DS_Store
 
 .idea/
+.cloudify/
 
