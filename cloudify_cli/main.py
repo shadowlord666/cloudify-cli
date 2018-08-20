@@ -40,6 +40,7 @@ from .commands import uninstall
 from .commands import workflows
 from .commands import blueprints
 from .commands import executions
+from .commands import operations
 from .commands import user_groups
 from .commands import deployments
 from .commands import node_instances
@@ -102,6 +103,7 @@ def _register_commands():
     _cfy.add_command(blueprints.blueprints)
     _cfy.add_command(executions.executions)
     _cfy.add_command(deployments.deployments)
+    _cfy.add_command(operations.operations)
 
     deployments.deployments.add_command(deployments.manager_create)
     deployments.deployments.add_command(deployments.manager_delete)
