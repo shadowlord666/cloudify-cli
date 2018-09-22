@@ -110,21 +110,22 @@ def is_validate_definitions_version():
 
 
 class ResolverWithPlugins(DefaultImportResolver):
-    PREFIX = 'plugin:'
+    REMOTE_RESOURCES_PREFIX = ('plugin:', 'blueprint:')
 
     def fetch_import(self, import_url):
-        if self._is_plugin_url(import_url):
+        if self._is_cloudify_repository_url(import_url):
             e = exceptions.CloudifyCliError(
-                'Error fetching plugin yaml: {0!r}\nBlueprints using plugin '
-                'repository imports can not be validated locally.'
+                'Error fetching remote resource yaml: {0!r}\nBlueprints using '
+                'Cloudify repository imports can not be validated locally.'
                 .format(import_url))
             e.possible_solutions = [
-                'Upload the blueprint to a Cloudify Manager',
-                'Use an explicit URL to the plugin YAML file instead of a '
-                'plugin repository `plugin:` import'
+                'Upload the blueprint/plugin to the Cloudify Manager',
+                'In case of a missing plugin, use an explicit URL '
+                'to the plugin YAML file instead of a plugin '
+                'repository `plugin:` import'
             ]
             raise e
         return super(ResolverWithPlugins, self).fetch_import(import_url)
 
-    def _is_plugin_url(self, import_url):
-        return import_url.startswith(self.PREFIX)
+    def _is_cloudify_repository_url(self, import_url):
+        return import_url.startswith(self.REMOTE_RESOURCES_PREFIX)
