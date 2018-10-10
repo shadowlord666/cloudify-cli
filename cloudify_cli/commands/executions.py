@@ -320,6 +320,19 @@ def manager_cancel(execution_id, force, kill, logger, client, tenant_name):
         "cfy executions get {0}".format(execution_id))
 
 
+@cfy.command(name='resume',
+             short_help='Cancel a workflow execution [manager only]')
+@cfy.argument('execution-id')
+@cfy.options.common_options
+@cfy.options.tenant_name(required=False, resource_name_for_help='execution')
+@cfy.assert_manager_active()
+@cfy.pass_client()
+@cfy.pass_logger
+def manager_resume(execution_id, logger, client, tenant_name):
+    utils.explicit_tenant_name_message(tenant_name, logger)
+    client.executions.resume(execution_id)
+
+
 @cfy.command(name='start',
              short_help='Execute a workflow')
 @cfy.argument('workflow-id')
