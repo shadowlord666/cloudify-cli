@@ -116,6 +116,7 @@ def _register_commands():
     executions.executions.add_command(executions.manager_cancel)
     executions.executions.add_command(executions.manager_list)
     executions.executions.add_command(executions.manager_get)
+    executions.executions.add_command(executions.manager_resume)
 
     # Commands which should be both in manager and local context
     # But change depending on the context.
